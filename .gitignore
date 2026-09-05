@@ -1,0 +1,7 @@
+mint
+mint.o
+mintctl
+mint-keysd
+config.h
+wlr-layer-shell-unstable-v1-protocol.h
+*.o

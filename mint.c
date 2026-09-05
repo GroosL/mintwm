@@ -35,6 +35,7 @@
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_ext_data_control_v1.h>
 #include <wlr/types/wlr_primary_selection.h>
@@ -102,6 +103,7 @@ struct mint_server {
 	struct wl_list keyboards;
 
 	struct wlr_output_layout *output_layout;
+	struct wlr_xdg_output_manager_v1 *xdg_output_manager;
 	struct wl_list outputs;
 	struct wl_listener new_output;
 
@@ -2279,6 +2281,8 @@ int main(int argc, char *argv[]) {
 	}
 
 	server.output_layout = wlr_output_layout_create(server.wl_display);
+	server.xdg_output_manager =
+		wlr_xdg_output_manager_v1_create(server.wl_display, server.output_layout);
 
 	wl_list_init(&server.outputs);
 	server.new_output.notify = server_new_output;

@@ -38,6 +38,7 @@
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_screencopy_v1.h>
+#include <wlr/types/wlr_session_lock_v1.h>
 #include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_ext_data_control_v1.h>
 #include <wlr/types/wlr_primary_selection.h>
@@ -65,6 +66,8 @@ struct mint_server {
 	struct wlr_scene_tree *scene_tree_top;
 	struct wlr_scene_tree *scene_tree_fullscreen;
 	struct wlr_scene_tree *scene_tree_overlay;
+	struct wlr_scene_tree *scene_tree_lock;
+	struct wlr_scene_rect *lock_bg;
 
 	struct wlr_xdg_shell *xdg_shell;
 	struct wl_listener new_xdg_toplevel;
@@ -83,6 +86,15 @@ struct mint_server {
 	struct wl_listener new_layer_shell_surface;
 
 	struct wlr_screencopy_manager_v1 *screencopy_mgr;
+
+	struct wlr_session_lock_manager_v1 *session_lock_mgr;
+	struct wl_listener new_session_lock;
+	struct wlr_session_lock_v1 *session_lock;
+	struct wl_listener session_lock_new_surface;
+	struct wl_listener session_lock_unlock;
+	struct wl_listener session_lock_destroy;
+	struct wl_list lock_surfaces;
+	bool locked;
 
 	struct wl_list toplevels;
 	struct mint_toplevel *focused_toplevel;
@@ -129,6 +141,15 @@ struct mint_output {
 
 	struct wl_list layers;
 	struct wlr_box usable_area;
+};
+
+struct mint_session_lock_surface {
+	struct wl_list link;
+	struct mint_server *server;
+	struct mint_output *output;
+	struct wlr_session_lock_surface_v1 *lock_surface;
+	struct wlr_scene_tree *scene_tree;
+	struct wl_listener destroy;
 };
 
 enum mint_toplevel_type {
@@ -215,6 +236,7 @@ struct mint_ipc_client {
 /* Forward declarations */
 static void arrange_windows(struct mint_server *server);
 static void arrange_layers(struct mint_output *output);
+static void update_lock_bg(struct mint_server *server);
 static void focus_toplevel(struct mint_server *server, struct mint_toplevel *toplevel);
 static void toplevel_set_fullscreen(struct mint_toplevel *tl, bool fullscreen);
 static struct mint_output *get_active_output(struct mint_server *server);
@@ -462,6 +484,9 @@ static void arrange_layers(struct mint_output *output) {
 }
 
 static void focus_toplevel(struct mint_server *server, struct mint_toplevel *toplevel) {
+	if (server->locked) {
+		return;
+	}
 	struct wlr_seat *seat = server->seat;
 
 	if (server->focused_toplevel && server->focused_toplevel != toplevel) {
@@ -492,7 +517,7 @@ static void focus_toplevel(struct mint_server *server, struct mint_toplevel *top
 }
 
 static void focus_cycle(struct mint_server *server, bool prev) {
-	if (wl_list_empty(&server->toplevels)) {
+	if (server->locked || wl_list_empty(&server->toplevels)) {
 		return;
 	}
 
@@ -708,6 +733,9 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 	struct mint_server *server = keyboard->server;
 	struct wlr_keyboard_key_event *event = data;
 	struct wlr_seat *seat = server->seat;
+	if (server->locked) {
+		goto pass_key;
+	}
 
 	if (server->key_grabber != NULL) {
 		uint32_t keycode = event->keycode + 8;
@@ -928,7 +956,17 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 		struct wlr_surface *surface = NULL;
 		struct mint_toplevel *toplevel = desktop_toplevel_at(server,
 				server->cursor->x, server->cursor->y, &surface, &sx, &sy);
-		if (toplevel != NULL) {
+		if (server->locked) {
+			if (surface != NULL) {
+				struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(server->seat);
+				if (keyboard != NULL) {
+					wlr_seat_keyboard_notify_enter(server->seat, surface,
+						keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
+				} else {
+					wlr_seat_keyboard_notify_enter(server->seat, surface, NULL, 0, NULL);
+				}
+			}
+		} else if (toplevel != NULL) {
 			focus_toplevel(server, toplevel);
 		}
 	}
@@ -968,6 +1006,19 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 	const struct wlr_output_event_request_state *event = data;
 	wlr_output_commit_state(output->wlr_output, event->state);
 	arrange_layers(output);
+	if (output->server->locked) {
+		update_lock_bg(output->server);
+		struct mint_session_lock_surface *surface;
+		wl_list_for_each(surface, &output->server->lock_surfaces, link) {
+			if (surface->output == output) {
+				struct wlr_box box;
+				wlr_output_layout_get_box(output->server->output_layout, output->wlr_output, &box);
+				wlr_scene_node_set_position(&surface->scene_tree->node, box.x, box.y);
+				wlr_session_lock_surface_v1_configure(surface->lock_surface, box.width, box.height);
+				break;
+			}
+		}
+	}
 }
 
 static void output_destroy(struct wl_listener *listener, void *data) {
@@ -977,6 +1028,9 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&output->request_state.link);
 	wl_list_remove(&output->destroy.link);
 	wl_list_remove(&output->link);
+	if (output->server->locked) {
+		update_lock_bg(output->server);
+	}
 	free(output);
 }
 
@@ -1022,6 +1076,9 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	wlr_scene_output_layout_add_output(server->scene_layout, l_output, scene_output);
 
 	arrange_layers(output);
+	if (server->locked) {
+		update_lock_bg(server);
+	}
 }
 
 /* Layer shell management (for external bars, docks, wallpapers) */
@@ -1048,7 +1105,8 @@ static void layer_surface_handle_map(struct wl_listener *listener, void *data) {
 	struct mint_layer_surface *layer_surface = wl_container_of(listener, layer_surface, map);
 	arrange_layers(layer_surface->output);
 
-	if (layer_surface->layer_surface->current.keyboard_interactive != ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE) {
+	if (!layer_surface->server->locked &&
+			layer_surface->layer_surface->current.keyboard_interactive != ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE) {
 		struct wlr_seat *seat = layer_surface->server->seat;
 		struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
 		if (keyboard) {
@@ -1063,7 +1121,9 @@ static void layer_surface_handle_unmap(struct wl_listener *listener, void *data)
 	arrange_layers(layer_surface->output);
 
 	if (layer_surface->server->seat->keyboard_state.focused_surface == layer_surface->layer_surface->surface) {
-		focus_toplevel(layer_surface->server, layer_surface->server->focused_toplevel);
+		if (!layer_surface->server->locked) {
+			focus_toplevel(layer_surface->server, layer_surface->server->focused_toplevel);
+		}
 	}
 }
 
@@ -1825,6 +1885,16 @@ static void ipc_execute_command(struct mint_server *server,
 		return;
 	}
 
+	if (server->locked) {
+		if (strcmp(cmd, "status") != 0 && strcmp(cmd, "get_workspace") != 0 &&
+				strcmp(cmd, "get_workspaces") != 0 && strcmp(cmd, "subscribe") != 0) {
+			if (resp && resp_size > 0) {
+				snprintf(resp, resp_size, "ERROR compositor is locked\n");
+			}
+			return;
+		}
+	}
+
 	if (strcmp(cmd, "grab_keys") == 0) {
 		server->key_grabber = client;
 		if (client && client->event_source) {
@@ -2017,8 +2087,8 @@ static void ipc_execute_command(struct mint_server *server,
 		}
 		const char *title = server->focused_toplevel ?
 			toplevel_get_title(server->focused_toplevel) : "";
-		snprintf(resp, resp_size, "{\"workspace\":%u,\"windows\":%d,\"title\":\"%s\"}\n",
-			server->current_workspace, count, title ? title : "");
+		snprintf(resp, resp_size, "{\"workspace\":%u,\"windows\":%d,\"title\":\"%s\",\"locked\":%s}\n",
+			server->current_workspace, count, title ? title : "", server->locked ? "true" : "false");
 		return;
 	}
 
@@ -2199,6 +2269,188 @@ static void ipc_finish(struct mint_server *server) {
 	}
 }
 
+/* Session Lock (ext-session-lock-v1) */
+static void update_lock_bg(struct mint_server *server) {
+	if (!server->lock_bg) return;
+	struct wlr_box box;
+	wlr_output_layout_get_box(server->output_layout, NULL, &box);
+	wlr_scene_node_set_position(&server->lock_bg->node, box.x, box.y);
+	wlr_scene_rect_set_size(server->lock_bg, box.width, box.height);
+	wlr_scene_node_lower_to_bottom(&server->lock_bg->node);
+}
+
+static void session_lock_surface_handle_destroy(struct wl_listener *listener, void *data) {
+	struct mint_session_lock_surface *surface =
+		wl_container_of(listener, surface, destroy);
+
+	wl_list_remove(&surface->destroy.link);
+	wl_list_remove(&surface->link);
+
+	if (surface->scene_tree) {
+		wlr_scene_node_destroy(&surface->scene_tree->node);
+		surface->scene_tree = NULL;
+	}
+
+	struct mint_server *server = surface->server;
+	free(surface);
+
+	if (server->locked && !wl_list_empty(&server->lock_surfaces)) {
+		struct mint_session_lock_surface *first =
+			wl_container_of(server->lock_surfaces.next, first, link);
+		struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(server->seat);
+		if (keyboard != NULL) {
+			wlr_seat_keyboard_notify_enter(server->seat, first->lock_surface->surface,
+				keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
+		} else {
+			wlr_seat_keyboard_notify_enter(server->seat, first->lock_surface->surface,
+				NULL, 0, NULL);
+		}
+	} else if (!server->locked) {
+		if (server->focused_toplevel) {
+			focus_toplevel(server, server->focused_toplevel);
+		}
+	} else {
+		wlr_seat_keyboard_notify_clear_focus(server->seat);
+	}
+}
+
+static void session_lock_handle_new_surface(struct wl_listener *listener, void *data) {
+	struct mint_server *server =
+		wl_container_of(listener, server, session_lock_new_surface);
+	struct wlr_session_lock_surface_v1 *lock_surface = data;
+	struct mint_output *output = lock_surface->output ? lock_surface->output->data : NULL;
+
+	if (!output) {
+		return;
+	}
+
+	struct mint_session_lock_surface *surface = calloc(1, sizeof(*surface));
+	if (!surface) {
+		return;
+	}
+
+	surface->server = server;
+	surface->output = output;
+	surface->lock_surface = lock_surface;
+	lock_surface->data = surface;
+
+	surface->scene_tree = wlr_scene_subsurface_tree_create(
+		server->scene_tree_lock, lock_surface->surface);
+
+	struct wlr_box box;
+	wlr_output_layout_get_box(server->output_layout, output->wlr_output, &box);
+	wlr_scene_node_set_position(&surface->scene_tree->node, box.x, box.y);
+
+	wlr_session_lock_surface_v1_configure(lock_surface, box.width, box.height);
+
+	surface->destroy.notify = session_lock_surface_handle_destroy;
+	wl_signal_add(&lock_surface->events.destroy, &surface->destroy);
+
+	wl_list_insert(&server->lock_surfaces, &surface->link);
+
+	struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(server->seat);
+	if (keyboard != NULL) {
+		wlr_seat_keyboard_notify_enter(server->seat, lock_surface->surface,
+			keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
+	} else {
+		wlr_seat_keyboard_notify_enter(server->seat, lock_surface->surface,
+			NULL, 0, NULL);
+	}
+}
+
+static void session_lock_handle_unlock(struct wl_listener *listener, void *data) {
+	struct mint_server *server =
+		wl_container_of(listener, server, session_lock_unlock);
+
+	server->locked = false;
+	server->session_lock = NULL;
+
+	wl_list_remove(&server->session_lock_new_surface.link);
+	wl_list_remove(&server->session_lock_unlock.link);
+	wl_list_remove(&server->session_lock_destroy.link);
+
+	if (server->lock_bg) {
+		wlr_scene_node_set_enabled(&server->lock_bg->node, false);
+	}
+
+	struct mint_session_lock_surface *surface, *tmp;
+	wl_list_for_each_safe(surface, tmp, &server->lock_surfaces, link) {
+		wl_list_remove(&surface->destroy.link);
+		wl_list_remove(&surface->link);
+		if (surface->scene_tree) {
+			wlr_scene_node_destroy(&surface->scene_tree->node);
+		}
+		free(surface);
+	}
+
+	wlr_seat_keyboard_notify_clear_focus(server->seat);
+	if (server->focused_toplevel) {
+		focus_toplevel(server, server->focused_toplevel);
+	}
+}
+
+static void session_lock_handle_destroy(struct wl_listener *listener, void *data) {
+	struct mint_server *server =
+		wl_container_of(listener, server, session_lock_destroy);
+
+	wl_list_remove(&server->session_lock_new_surface.link);
+	wl_list_remove(&server->session_lock_unlock.link);
+	wl_list_remove(&server->session_lock_destroy.link);
+
+	server->session_lock = NULL;
+
+	struct mint_session_lock_surface *surface, *tmp;
+	wl_list_for_each_safe(surface, tmp, &server->lock_surfaces, link) {
+		wl_list_remove(&surface->destroy.link);
+		wl_list_remove(&surface->link);
+		if (surface->scene_tree) {
+			wlr_scene_node_destroy(&surface->scene_tree->node);
+		}
+		free(surface);
+	}
+
+	/* If client died while locked without unlocking, session must remain locked */
+	if (server->locked) {
+		wlr_seat_keyboard_notify_clear_focus(server->seat);
+		update_lock_bg(server);
+		if (server->lock_bg) {
+			wlr_scene_node_set_enabled(&server->lock_bg->node, true);
+		}
+	}
+}
+
+static void server_new_session_lock(struct wl_listener *listener, void *data) {
+	struct mint_server *server =
+		wl_container_of(listener, server, new_session_lock);
+	struct wlr_session_lock_v1 *lock = data;
+
+	if (server->session_lock != NULL) {
+		wlr_session_lock_v1_destroy(lock);
+		return;
+	}
+
+	server->session_lock = lock;
+	server->locked = true;
+
+	update_lock_bg(server);
+	if (server->lock_bg) {
+		wlr_scene_node_set_enabled(&server->lock_bg->node, true);
+	}
+
+	wlr_seat_keyboard_notify_clear_focus(server->seat);
+
+	server->session_lock_new_surface.notify = session_lock_handle_new_surface;
+	wl_signal_add(&lock->events.new_surface, &server->session_lock_new_surface);
+
+	server->session_lock_unlock.notify = session_lock_handle_unlock;
+	wl_signal_add(&lock->events.unlock, &server->session_lock_unlock);
+
+	server->session_lock_destroy.notify = session_lock_handle_destroy;
+	wl_signal_add(&lock->events.destroy, &server->session_lock_destroy);
+
+	wlr_session_lock_v1_send_locked(lock);
+}
+
 static struct mint_server *g_server = NULL;
 
 static void handle_sigchld(int signo) {
@@ -2216,6 +2468,8 @@ static void handle_sigchld(int signo) {
 static const char *const screencopy_allowed_clients[] = {
 	"grim",
 	"xdg-desktop-portal-wlr",
+	"hyprlock",
+	"swaylock",
 };
 
 static bool match_binary_name(const char *path, const char *target) {
@@ -2404,6 +2658,10 @@ int main(int argc, char *argv[]) {
 	server.scene_tree_top = wlr_scene_tree_create(&server.scene->tree);
 	server.scene_tree_fullscreen = wlr_scene_tree_create(&server.scene->tree);
 	server.scene_tree_overlay = wlr_scene_tree_create(&server.scene->tree);
+	server.scene_tree_lock = wlr_scene_tree_create(&server.scene->tree);
+	static const float lock_black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+	server.lock_bg = wlr_scene_rect_create(server.scene_tree_lock, 0, 0, lock_black);
+	wlr_scene_node_set_enabled(&server.lock_bg->node, false);
 
 	wl_list_init(&server.toplevels);
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
@@ -2429,6 +2687,13 @@ int main(int argc, char *argv[]) {
 	if (server.layer_shell) {
 		server.new_layer_shell_surface.notify = server_new_layer_shell_surface;
 		wl_signal_add(&server.layer_shell->events.new_surface, &server.new_layer_shell_surface);
+	}
+
+	wl_list_init(&server.lock_surfaces);
+	server.session_lock_mgr = wlr_session_lock_manager_v1_create(server.wl_display);
+	if (server.session_lock_mgr) {
+		server.new_session_lock.notify = server_new_session_lock;
+		wl_signal_add(&server.session_lock_mgr->events.new_lock, &server.new_session_lock);
 	}
 
 	server.cursor = wlr_cursor_create();
@@ -2515,6 +2780,9 @@ int main(int argc, char *argv[]) {
 	}
 	if (server.layer_shell) {
 		wl_list_remove(&server.new_layer_shell_surface.link);
+	}
+	if (server.session_lock_mgr) {
+		wl_list_remove(&server.new_session_lock.link);
 	}
 
 	wl_list_remove(&server.cursor_motion.link);

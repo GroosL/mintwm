@@ -36,6 +36,7 @@
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
+#include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_ext_data_control_v1.h>
 #include <wlr/types/wlr_primary_selection.h>
@@ -79,6 +80,8 @@ struct mint_server {
 
 	struct wlr_layer_shell_v1 *layer_shell;
 	struct wl_listener new_layer_shell_surface;
+
+	struct wlr_screencopy_manager_v1 *screencopy_mgr;
 
 	struct wl_list toplevels;
 	struct mint_toplevel *focused_toplevel;
@@ -2266,6 +2269,7 @@ int main(int argc, char *argv[]) {
 	wlr_ext_data_control_manager_v1_create(server.wl_display, 1);
 	wlr_primary_selection_v1_device_manager_create(server.wl_display);
 	wlr_viewporter_create(server.wl_display);
+	server.screencopy_mgr = wlr_screencopy_manager_v1_create(server.wl_display);
 
 	server.xwayland = wlr_xwayland_create(server.wl_display, server.compositor, true);
 	if (server.xwayland) {

@@ -8,6 +8,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <limits.h>
 #include <signal.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -2212,6 +2213,106 @@ static void handle_sigchld(int signo) {
 	}
 }
 
+static const char *const screencopy_allowed_clients[] = {
+	"grim",
+	"xdg-desktop-portal-wlr",
+};
+
+static bool match_binary_name(const char *path, const char *target) {
+	if (!path || !target) {
+		return false;
+	}
+
+	const char *base = strrchr(path, '/');
+	if (base) {
+		base++;
+	} else {
+		base = path;
+	}
+
+	/* Strip leading dot (e.g. Nixpkgs wrapper .foo-wrapped) */
+	if (base[0] == '.') {
+		base++;
+	}
+
+	/* Make a local copy to strip suffixes */
+	char clean[256];
+	strncpy(clean, base, sizeof(clean) - 1);
+	clean[sizeof(clean) - 1] = '\0';
+
+	/* Strip " (deleted)" suffix if present */
+	char *del = strstr(clean, " (deleted)");
+	if (del) {
+		*del = '\0';
+	}
+
+	/* Strip "-wrapped" suffix if present (Nixpkgs wrapper) */
+	size_t clen = strlen(clean);
+	static const char wrapped_suffix[] = "-wrapped";
+	size_t wlen = sizeof(wrapped_suffix) - 1;
+	if (clen > wlen && strcmp(clean + clen - wlen, wrapped_suffix) == 0) {
+		clean[clen - wlen] = '\0';
+	}
+
+	return strcmp(clean, target) == 0;
+}
+
+static bool is_authorized_screencopy_client(const struct wl_client *client) {
+	pid_t pid = 0;
+	uid_t uid = 0;
+	gid_t gid = 0;
+	wl_client_get_credentials(client, &pid, &uid, &gid);
+
+	if (pid <= 0) {
+		return false;
+	}
+
+	/* 1. Check /proc/<pid>/exe target */
+	char proc_path[64];
+	snprintf(proc_path, sizeof(proc_path), "/proc/%d/exe", pid);
+
+	char exe_path[PATH_MAX];
+	ssize_t len = readlink(proc_path, exe_path, sizeof(exe_path) - 1);
+	if (len > 0) {
+		exe_path[len] = '\0';
+		for (size_t i = 0; i < sizeof(screencopy_allowed_clients) / sizeof(screencopy_allowed_clients[0]); i++) {
+			if (match_binary_name(exe_path, screencopy_allowed_clients[i])) {
+				return true;
+			}
+		}
+	}
+
+	/* 2. Check /proc/<pid>/cmdline (argv[0]) for wrapper scripts */
+	snprintf(proc_path, sizeof(proc_path), "/proc/%d/cmdline", pid);
+	FILE *f = fopen(proc_path, "r");
+	if (f) {
+		char cmdline[PATH_MAX];
+		size_t n = fread(cmdline, 1, sizeof(cmdline) - 1, f);
+		fclose(f);
+		if (n > 0) {
+			cmdline[n] = '\0';
+			for (size_t i = 0; i < sizeof(screencopy_allowed_clients) / sizeof(screencopy_allowed_clients[0]); i++) {
+				if (match_binary_name(cmdline, screencopy_allowed_clients[i])) {
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+static bool server_global_filter(const struct wl_client *client,
+		const struct wl_global *global, void *data) {
+	struct mint_server *server = data;
+
+	if (server->screencopy_mgr && global == server->screencopy_mgr->global) {
+		return is_authorized_screencopy_client(client);
+	}
+
+	return true;
+}
+
 int main(int argc, char *argv[]) {
 	wlr_log_init(WLR_INFO, NULL);
 	char *startup_cmd = NULL;
@@ -2270,6 +2371,7 @@ int main(int argc, char *argv[]) {
 	wlr_primary_selection_v1_device_manager_create(server.wl_display);
 	wlr_viewporter_create(server.wl_display);
 	server.screencopy_mgr = wlr_screencopy_manager_v1_create(server.wl_display);
+	wl_display_set_global_filter(server.wl_display, server_global_filter, &server);
 
 	server.xwayland = wlr_xwayland_create(server.wl_display, server.compositor, true);
 	if (server.xwayland) {

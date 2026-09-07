@@ -2,6 +2,8 @@ mint
 mint.o
 mintctl
 mint-keysd
+mint-fs
 config.h
 wlr-layer-shell-unstable-v1-protocol.h
 *.o
+future

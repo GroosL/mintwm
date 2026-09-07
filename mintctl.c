@@ -10,8 +10,8 @@ static void print_usage(const char *prog) {
 	fprintf(stderr, "Commands:\n");
 	fprintf(stderr, "  sh <command>              Run shell command in background\n");
 	fprintf(stderr, "  run <command>             Alias for sh\n");
-	fprintf(stderr, "  workspace <1-9|next|prev> Switch workspace\n");
-	fprintf(stderr, "  moveto <1-9>              Move focused window to workspace\n");
+	fprintf(stderr, "  workspace <1-9|next|prev|back> Switch workspace\n");
+	fprintf(stderr, "  moveto <1-9|back>         Move focused window to workspace\n");
 	fprintf(stderr, "  close                     Close focused window\n");
 	fprintf(stderr, "  focus <next|prev|master>  Change window focus\n");
 	fprintf(stderr, "  swap                      Swap focused window with master\n");

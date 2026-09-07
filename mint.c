@@ -99,6 +99,7 @@ struct mint_server {
 	struct wl_list toplevels;
 	struct mint_toplevel *focused_toplevel;
 	unsigned int current_workspace;
+	unsigned int prev_workspace;
 	struct mint_toplevel *last_focused_per_workspace[NUM_WORKSPACES];
 	double mfact;
 
@@ -647,6 +648,7 @@ static void change_workspace(struct mint_server *server, unsigned int ws) {
 	}
 
 	server->last_focused_per_workspace[server->current_workspace - 1] = server->focused_toplevel;
+	server->prev_workspace = server->current_workspace;
 	server->current_workspace = ws;
 
 	struct mint_toplevel *tl;
@@ -1956,13 +1958,19 @@ static void ipc_execute_command(struct mint_server *server,
 			unsigned int prev_ws = (server->current_workspace == 1) ? NUM_WORKSPACES : server->current_workspace - 1;
 			change_workspace(server, prev_ws);
 			snprintf(resp, resp_size, "OK workspace %u\n", prev_ws);
+		} else if (strcmp(arg, "back") == 0 || strcmp(arg, "previous") == 0 ||
+		           strcmp(arg, "toggle") == 0 || strcmp(arg, "last") == 0 ||
+		           strcmp(arg, "back_and_forth") == 0) {
+			unsigned int target_ws = server->prev_workspace;
+			change_workspace(server, target_ws);
+			snprintf(resp, resp_size, "OK workspace %u\n", server->current_workspace);
 		} else {
 			int ws = atoi(arg);
 			if (ws >= 1 && ws <= NUM_WORKSPACES) {
 				change_workspace(server, (unsigned int)ws);
 				snprintf(resp, resp_size, "OK workspace %u\n", (unsigned int)ws);
 			} else {
-				snprintf(resp, resp_size, "ERROR invalid workspace (1-%d)\n", NUM_WORKSPACES);
+				snprintf(resp, resp_size, "ERROR invalid workspace (1-%d, next, prev, back)\n", NUM_WORKSPACES);
 			}
 		}
 		return;
@@ -1973,7 +1981,15 @@ static void ipc_execute_command(struct mint_server *server,
 		while (*arg != ' ' && *arg != '\0') arg++;
 		while (*arg == ' ') arg++;
 
-		int ws = atoi(arg);
+		int ws;
+		if (strcmp(arg, "back") == 0 || strcmp(arg, "previous") == 0 ||
+		    strcmp(arg, "toggle") == 0 || strcmp(arg, "last") == 0 ||
+		    strcmp(arg, "back_and_forth") == 0) {
+			ws = (int)server->prev_workspace;
+		} else {
+			ws = atoi(arg);
+		}
+
 		if (ws >= 1 && ws <= NUM_WORKSPACES) {
 			if (server->focused_toplevel != NULL) {
 				move_to_workspace(server, (unsigned int)ws);
@@ -1982,7 +1998,7 @@ static void ipc_execute_command(struct mint_server *server,
 				snprintf(resp, resp_size, "ERROR no focused window\n");
 			}
 		} else {
-			snprintf(resp, resp_size, "ERROR invalid workspace (1-%d)\n", NUM_WORKSPACES);
+			snprintf(resp, resp_size, "ERROR invalid workspace (1-%d, back)\n", NUM_WORKSPACES);
 		}
 		return;
 	}
@@ -2103,8 +2119,8 @@ static void ipc_execute_command(struct mint_server *server,
 			"Commands:\n"
 			"  sh <cmd>                  Run shell command\n"
 			"  run <cmd>                 Alias for sh\n"
-			"  workspace <1-9|next|prev> Change workspace\n"
-			"  moveto <1-9>              Move focused window to workspace\n"
+			"  workspace <1-9|next|prev|back> Change workspace\n"
+			"  moveto <1-9|back>         Move focused window to workspace\n"
 			"  close                     Close focused window\n"
 			"  focus <next|prev|master>  Change window focus\n"
 			"  swap                      Swap focused window with master\n"
@@ -2585,6 +2601,7 @@ int main(int argc, char *argv[]) {
 
 	struct mint_server server = {0};
 	server.current_workspace = 1;
+	server.prev_workspace = 1;
 	server.mfact = DEFAULT_MFACT;
 	server.ipc_fd = -1;
 	g_server = &server;

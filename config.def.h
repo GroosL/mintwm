@@ -72,6 +72,7 @@ static const struct Binding bindings[] = {
 	{ MODE_NORMAL,   MODKEY | WLR_MODIFIER_SHIFT,  XKB_KEY_e,        "exit",             MODE_NORMAL },
 
 	/* --- Workspaces 1-9 --- */
+	{ MODE_NORMAL,   MODKEY,                       XKB_KEY_Tab,      "workspace back",   MODE_NORMAL },
 	WSKEYS(MODE_NORMAL, MODKEY,                        "workspace"),
 	WSKEYS(MODE_NORMAL, MODKEY | WLR_MODIFIER_SHIFT,   "moveto"),
 
@@ -82,6 +83,7 @@ static const struct Binding bindings[] = {
 	{ MODE_SUPER_D,  0,                            XKB_KEY_Escape,   NULL,               MODE_NORMAL },
 
 	/* --- Chord Mode: Super + w --- */
+	{ MODE_SUPER_W,  0,                            XKB_KEY_Tab,      "workspace back",   MODE_NORMAL },
 	WSKEYS(MODE_SUPER_W, 0,                            "workspace"),
 	{ MODE_SUPER_W,  0,                            XKB_KEY_Escape,   NULL,               MODE_NORMAL },
 };

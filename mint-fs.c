@@ -357,5 +357,10 @@ int main(int argc, char *argv[]) {
 		return 0;
 	}
 
+  if (mkdir(argv[argc - 1], 0700) == -1 && errno != EEXIST) {
+    perror("mkdir");
+    return 1;
+  }
+
 	return fuse_main(argc, argv, &mint_oper, NULL);
 }

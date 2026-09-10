@@ -16,6 +16,10 @@ static void print_usage(const char *prog) {
 	fprintf(stderr, "  focus <next|prev|master>  Change window focus\n");
 	fprintf(stderr, "  swap                      Swap focused window with master\n");
 	fprintf(stderr, "  fullscreen                Toggle fullscreen for focused window\n");
+	fprintf(stderr, "  toggle_swallow            Toggle window swallow\n");
+	fprintf(stderr, "  get_swallow               Print swallowing state (0 or 1)\n");
+	fprintf(stderr, "  toggle_auto_swallow       Toggle auto-swallow on/off\n");
+	fprintf(stderr, "  auto_swallow <on|off|toggle> Control auto-swallow\n");
 	fprintf(stderr, "  mfact <0.1-0.9|+/-0.05>   Change master area factor\n");
 	fprintf(stderr, "  get_workspace             Print active workspace number\n");
 	fprintf(stderr, "  get_workspaces            Print workspace list with [active]\n");

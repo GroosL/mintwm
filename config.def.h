@@ -69,6 +69,7 @@ static const struct Binding bindings[] = {
 	{ MODE_NORMAL,   MODKEY,                       XKB_KEY_k,        "focus prev",       MODE_NORMAL },
 	{ MODE_NORMAL,   MODKEY | WLR_MODIFIER_SHIFT,  XKB_KEY_Return,   "swap",             MODE_NORMAL },
 	{ MODE_NORMAL,   MODKEY,                       XKB_KEY_f,        "fullscreen",       MODE_NORMAL },
+	{ MODE_NORMAL,   MODKEY,                       XKB_KEY_s,        "toggle_swallow",   MODE_NORMAL },
 	{ MODE_NORMAL,   MODKEY | WLR_MODIFIER_SHIFT,  XKB_KEY_e,        "exit",             MODE_NORMAL },
 
 	/* --- Workspaces 1-9 --- */

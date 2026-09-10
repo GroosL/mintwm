@@ -125,6 +125,10 @@ static int get_file_content(const char *path, char *buf, size_t max) {
 	} else if (strcmp(path, "/ctl") == 0) {
 		snprintf(buf, max, "%s", last_ctl_reply);
 		return 0;
+	} else if (strcmp(path, "/swallow") == 0 || strcmp(path, "/windows/active/swallow") == 0) {
+		return ipc_query("get_swallow\n", buf, max);
+	} else if (strcmp(path, "/auto_swallow") == 0) {
+		return ipc_query("auto_swallow\n", buf, max);
 	} else if (strcmp(path, "/windows/active/workspace") == 0) {
 		return ipc_query("get_workspace\n", buf, max);
 	}
@@ -147,6 +151,9 @@ static int mint_getattr(const char *path, struct stat *stbuf, struct fuse_file_i
 	if (strcmp(path, "/ctl") == 0 ||
 	    strcmp(path, "/current_workspace") == 0 ||
 	    strcmp(path, "/mfact") == 0 ||
+	    strcmp(path, "/swallow") == 0 ||
+	    strcmp(path, "/auto_swallow") == 0 ||
+	    strcmp(path, "/windows/active/swallow") == 0 ||
 	    strcmp(path, "/windows/active/workspace") == 0) {
 		stbuf->st_mode = S_IFREG | 0666;
 		char content[1024];
@@ -198,6 +205,8 @@ static int mint_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		filler(buf, "workspaces", NULL, 0, 0);
 		filler(buf, "mfact", NULL, 0, 0);
 		filler(buf, "focus", NULL, 0, 0);
+		filler(buf, "swallow", NULL, 0, 0);
+		filler(buf, "auto_swallow", NULL, 0, 0);
 		filler(buf, "windows", NULL, 0, 0);
 		return 0;
 	}
@@ -215,6 +224,7 @@ static int mint_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		filler(buf, "title", NULL, 0, 0);
 		filler(buf, "ctl", NULL, 0, 0);
 		filler(buf, "workspace", NULL, 0, 0);
+		filler(buf, "swallow", NULL, 0, 0);
 		return 0;
 	}
 
@@ -232,9 +242,12 @@ static int mint_open(const char *path, struct fuse_file_info *fi) {
 	    strcmp(path, "/workspaces") == 0 ||
 	    strcmp(path, "/mfact") == 0 ||
 	    strcmp(path, "/focus") == 0 ||
+	    strcmp(path, "/swallow") == 0 ||
+	    strcmp(path, "/auto_swallow") == 0 ||
 	    strcmp(path, "/windows/active/title") == 0 ||
 	    strcmp(path, "/windows/active/ctl") == 0 ||
-	    strcmp(path, "/windows/active/workspace") == 0) {
+	    strcmp(path, "/windows/active/workspace") == 0 ||
+	    strcmp(path, "/windows/active/swallow") == 0) {
 		return 0;
 	}
 
@@ -305,6 +318,18 @@ static int mint_write(const char *path, const char *buf, size_t size,
 		return (int)size;
 	}
 
+	if (strcmp(path, "/swallow") == 0 || strcmp(path, "/windows/active/swallow") == 0) {
+		snprintf(cmd, sizeof(cmd), "toggle_swallow\n");
+		ipc_query(cmd, last_ctl_reply, sizeof(last_ctl_reply));
+		return (int)size;
+	}
+
+	if (strcmp(path, "/auto_swallow") == 0) {
+		snprintf(cmd, sizeof(cmd), "auto_swallow %s\n", clean);
+		ipc_query(cmd, last_ctl_reply, sizeof(last_ctl_reply));
+		return (int)size;
+	}
+
 	if (strcmp(path, "/windows/active/ctl") == 0) {
 		snprintf(cmd, sizeof(cmd), "%s\n", clean);
 		ipc_query(cmd, last_ctl_reply, sizeof(last_ctl_reply));
@@ -340,9 +365,12 @@ static void print_usage(const char *prog) {
 	printf("  workspaces               Read workspace list with [active]\n");
 	printf("  mfact                    Read or write master area factor (0.1 - 0.9)\n");
 	printf("  focus                    Write next, prev, or master\n");
+	printf("  swallow                  Read swallowing state (0 or 1) / write to toggle\n");
+	printf("  auto_swallow             Read (0 or 1) / write (on/off/toggle) auto-swallowing\n");
 	printf("  windows/active/title     Read active window title\n");
-	printf("  windows/active/ctl       Write close, fullscreen, or swap\n");
-	printf("  windows/active/workspace Write workspace number to move active window\n\n");
+	printf("  windows/active/ctl       Write close, fullscreen, swap, or toggle_swallow\n");
+	printf("  windows/active/workspace Write workspace number to move active window\n");
+	printf("  windows/active/swallow   Read swallowing state (0 or 1) / write to toggle\n\n");
 	printf("Examples:\n");
 	printf("  mkdir -p ~/.mint && %s ~/.mint\n", prog);
 	printf("  cat ~/.mint/current_workspace\n");

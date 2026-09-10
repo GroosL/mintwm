@@ -102,6 +102,7 @@ struct mint_server {
 	unsigned int prev_workspace;
 	struct mint_toplevel *last_focused_per_workspace[NUM_WORKSPACES];
 	double mfact;
+	bool auto_swallow;
 
 	struct wlr_cursor *cursor;
 	struct wlr_xcursor_manager *cursor_mgr;
@@ -170,9 +171,14 @@ struct mint_toplevel {
 
 	bool mapped;
 	bool is_fullscreen;
+	bool swallowee_was_fullscreen;
 	unsigned int workspace;
 	int pending_x, pending_y;
 	int pending_width, pending_height;
+
+	struct mint_toplevel *swallowed_by;
+	struct mint_toplevel *swallowing;
+	struct mint_toplevel *last_swallowed;
 
 	struct wlr_xdg_toplevel_decoration_v1 *decoration;
 	struct wl_listener decoration_request_mode;
@@ -245,6 +251,10 @@ static void ipc_broadcast_state(struct mint_server *server);
 static void ipc_execute_command(struct mint_server *server,
 		struct mint_ipc_client *client,
 		const char *cmd, char *resp, size_t resp_size);
+static void swallow_toplevel(struct mint_server *server, struct mint_toplevel *swallower, struct mint_toplevel *swallowee);
+static void unswallow_toplevel(struct mint_server *server, struct mint_toplevel *swallower);
+static void try_auto_swallow(struct mint_server *server, struct mint_toplevel *swallower);
+static bool toplevel_toggle_swallow(struct mint_server *server, struct mint_toplevel *tl);
 
 static struct wlr_scene_tree *get_layer_tree(struct mint_server *server,
 		enum zwlr_layer_shell_v1_layer layer) {
@@ -283,7 +293,7 @@ static struct wlr_surface *toplevel_get_surface(struct mint_toplevel *tl) {
 }
 
 static inline bool toplevel_is_mapped(struct mint_toplevel *tl) {
-	return tl != NULL && tl->mapped;
+	return tl != NULL && tl->mapped && tl->swallowed_by == NULL;
 }
 
 static const char *toplevel_get_title(struct mint_toplevel *tl) {
@@ -306,6 +316,112 @@ static const char *toplevel_get_title(struct mint_toplevel *tl) {
 		}
 	}
 	return "";
+}
+
+static const char *toplevel_get_app_id(struct mint_toplevel *tl) {
+	if (!tl) return "";
+	if (tl->type == MINT_TOPLEVEL_XDG && tl->xdg_toplevel && tl->xdg_toplevel->app_id) {
+		return tl->xdg_toplevel->app_id;
+	}
+	if ((tl->type == MINT_TOPLEVEL_XWAYLAND || tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) && tl->xwayland_surface) {
+		if (tl->xwayland_surface->class && tl->xwayland_surface->class[0] != '\0') {
+			return tl->xwayland_surface->class;
+		}
+		if (tl->xwayland_surface->instance && tl->xwayland_surface->instance[0] != '\0') {
+			return tl->xwayland_surface->instance;
+		}
+	}
+	return "";
+}
+
+static pid_t toplevel_get_pid(struct mint_toplevel *tl) {
+	if (!tl) return 0;
+	if (tl->type == MINT_TOPLEVEL_XDG && tl->xdg_toplevel && tl->xdg_toplevel->base &&
+	    tl->xdg_toplevel->base->client && tl->xdg_toplevel->base->client->client) {
+		pid_t pid = 0;
+		wl_client_get_credentials(tl->xdg_toplevel->base->client->client, &pid, NULL, NULL);
+		return pid;
+	}
+	if ((tl->type == MINT_TOPLEVEL_XWAYLAND || tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) && tl->xwayland_surface) {
+		return tl->xwayland_surface->pid;
+	}
+	return 0;
+}
+
+static pid_t get_parent_pid(pid_t pid) {
+	if (pid <= 1) return 0;
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+	FILE *f = fopen(path, "r");
+	if (!f) return 0;
+	char buf[512];
+	if (!fgets(buf, sizeof(buf), f)) {
+		fclose(f);
+		return 0;
+	}
+	fclose(f);
+	char *rparen = strrchr(buf, ')');
+	if (!rparen) return 0;
+	char state;
+	int ppid = 0;
+	if (sscanf(rparen + 1, " %c %d", &state, &ppid) == 2) {
+		return (pid_t)ppid;
+	}
+	return 0;
+}
+
+static size_t get_ancestor_pids(pid_t pid, pid_t *pids, size_t max_pids) {
+	size_t count = 0;
+	pid_t cur = pid;
+	while (count < max_pids && cur > 1) {
+		cur = get_parent_pid(cur);
+		if (cur <= 1) break;
+		pids[count++] = cur;
+	}
+	return count;
+}
+
+static bool has_ancestor_pid(pid_t target, const pid_t *ancestors, size_t n_ancestors) {
+	if (target <= 1) return false;
+	for (size_t i = 0; i < n_ancestors; i++) {
+		if (ancestors[i] == target) return true;
+	}
+	return false;
+}
+
+static bool is_terminal_app(const char *app_id) {
+	if (!app_id || app_id[0] == '\0') return false;
+	static const char *terminals[] = {
+		"foot",
+		"footclient",
+		"kitty",
+		"alacritty",
+		"Alacritty",
+		"wezterm",
+		"org.wezfurlong.wezterm",
+		"xterm",
+		"XTerm",
+		"urxvt",
+		"URxvt",
+		"st",
+		"st-256color",
+		"ghostty",
+		"com.mitchellh.ghostty",
+		"rio",
+		"contour",
+		"blackbox",
+		"terminator",
+		"konsole",
+		"gnome-terminal",
+		"xfce4-terminal",
+		"lxterminal",
+	};
+	for (size_t i = 0; i < sizeof(terminals) / sizeof(terminals[0]); i++) {
+		if (strcasecmp(app_id, terminals[i]) == 0) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void toplevel_set_size_and_position(struct mint_toplevel *tl, int x, int y, int width, int height) {
@@ -488,6 +604,9 @@ static void focus_toplevel(struct mint_server *server, struct mint_toplevel *top
 	if (server->locked) {
 		return;
 	}
+	if (toplevel && toplevel->swallowed_by != NULL) {
+		toplevel = toplevel->swallowed_by;
+	}
 	struct wlr_seat *seat = server->seat;
 
 	if (server->focused_toplevel && server->focused_toplevel != toplevel) {
@@ -515,6 +634,232 @@ static void focus_toplevel(struct mint_server *server, struct mint_toplevel *top
 			keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
 	}
 	ipc_broadcast_state(server);
+}
+
+static void swallow_toplevel(struct mint_server *server, struct mint_toplevel *swallower, struct mint_toplevel *swallowee) {
+	if (!swallower || !swallowee || swallower == swallowee) return;
+
+	if (swallower->swallowing != NULL) {
+		unswallow_toplevel(server, swallower);
+	}
+	if (swallowee->swallowed_by != NULL) {
+		unswallow_toplevel(server, swallowee->swallowed_by);
+	}
+	if (swallowee->swallowing != NULL) {
+		unswallow_toplevel(server, swallowee);
+	}
+
+	swallower->swallowing = swallowee;
+	swallowee->swallowed_by = swallower;
+	swallower->last_swallowed = swallowee;
+	swallower->swallowee_was_fullscreen = swallowee->is_fullscreen;
+	swallowee->workspace = swallower->workspace;
+
+	if (swallowee->is_fullscreen) {
+		toplevel_set_fullscreen(swallowee, false);
+		toplevel_set_fullscreen(swallower, true);
+	}
+
+	for (int i = 0; i < NUM_WORKSPACES; i++) {
+		if (server->last_focused_per_workspace[i] == swallowee) {
+			server->last_focused_per_workspace[i] = swallower;
+		}
+	}
+
+	if (swallowee->scene_tree) {
+		wlr_scene_node_set_enabled(&swallowee->scene_tree->node, false);
+	}
+
+	/* Swallower replaces swallowee in server->toplevels */
+	if (!wl_list_empty(&swallower->link)) {
+		wl_list_remove(&swallower->link);
+	}
+	if (!wl_list_empty(&swallowee->link)) {
+		wl_list_insert(swallowee->link.prev, &swallower->link);
+		wl_list_remove(&swallowee->link);
+		wl_list_init(&swallowee->link);
+	} else {
+		wl_list_insert(&server->toplevels, &swallower->link);
+	}
+
+	arrange_windows(server);
+	focus_toplevel(server, swallower);
+}
+
+static void unswallow_toplevel(struct mint_server *server, struct mint_toplevel *swallower) {
+	if (!swallower || !swallower->swallowing) return;
+	struct mint_toplevel *swallowee = swallower->swallowing;
+
+	swallower->swallowing = NULL;
+	swallowee->swallowed_by = NULL;
+	swallower->last_swallowed = swallowee;
+	swallowee->workspace = swallower->workspace;
+
+	if (wl_list_empty(&swallowee->link)) {
+		if (!wl_list_empty(&swallower->link)) {
+			wl_list_insert(swallower->link.prev, &swallowee->link);
+		} else {
+			wl_list_insert(&server->toplevels, &swallowee->link);
+		}
+	}
+
+	if (swallower->swallowee_was_fullscreen) {
+		toplevel_set_fullscreen(swallowee, true);
+	}
+
+	if (swallowee->scene_tree) {
+		bool visible = (swallowee->workspace == server->current_workspace);
+		wlr_scene_node_set_enabled(&swallowee->scene_tree->node, visible);
+	}
+
+	for (int i = 0; i < NUM_WORKSPACES; i++) {
+		if (server->last_focused_per_workspace[i] == swallower) {
+			server->last_focused_per_workspace[i] = swallowee;
+		}
+	}
+
+	arrange_windows(server);
+}
+
+static void try_auto_swallow(struct mint_server *server, struct mint_toplevel *swallower) {
+	if (!server->auto_swallow || !swallower || swallower->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) return;
+
+	const char *app_id = toplevel_get_app_id(swallower);
+	if (is_terminal_app(app_id)) {
+		return;
+	}
+
+	pid_t swallower_pid = toplevel_get_pid(swallower);
+	if (swallower_pid <= 1) return;
+
+	pid_t ancestors[32];
+	size_t n_ancestors = get_ancestor_pids(swallower_pid, ancestors, 32);
+	if (n_ancestors == 0) return;
+
+	struct mint_toplevel *target = NULL;
+
+	/* 1. First check currently focused toplevel if it is a terminal on the same workspace */
+	struct mint_toplevel *focused = server->focused_toplevel;
+	if (focused && focused != swallower && focused->mapped && focused->swallowed_by == NULL &&
+	    focused->workspace == swallower->workspace &&
+	    is_terminal_app(toplevel_get_app_id(focused))) {
+		pid_t term_pid = toplevel_get_pid(focused);
+		if (has_ancestor_pid(term_pid, ancestors, n_ancestors)) {
+			target = focused;
+		}
+	}
+
+	/* 2. Check closest ancestor among mapped terminals on the same workspace */
+	if (!target) {
+		for (size_t i = 0; i < n_ancestors && !target; i++) {
+			struct mint_toplevel *tl;
+			wl_list_for_each(tl, &server->toplevels, link) {
+				if (tl != swallower && tl->mapped && tl->swallowed_by == NULL &&
+				    tl->workspace == swallower->workspace &&
+				    is_terminal_app(toplevel_get_app_id(tl))) {
+					if (ancestors[i] == toplevel_get_pid(tl)) {
+						target = tl;
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	if (target) {
+		swallow_toplevel(server, swallower, target);
+	}
+}
+
+static bool toplevel_toggle_swallow(struct mint_server *server, struct mint_toplevel *tl) {
+	if (!tl) return false;
+
+	/* If tl is currently swallowing another window: unswallow */
+	if (tl->swallowing != NULL) {
+		unswallow_toplevel(server, tl);
+		return false;
+	}
+
+	/* If tl is NOT swallowing anything: find candidate to swallow */
+	struct mint_toplevel *target = NULL;
+
+	/* Candidate 1: last_swallowed if still valid */
+	if (tl->last_swallowed != NULL &&
+	    tl->last_swallowed->mapped &&
+	    tl->last_swallowed->swallowed_by == NULL &&
+	    tl->last_swallowed->workspace == tl->workspace) {
+		target = tl->last_swallowed;
+	}
+
+	/* Candidate 2: If tl is not a terminal, look for a terminal ancestor on this workspace */
+	if (!target && !is_terminal_app(toplevel_get_app_id(tl))) {
+		pid_t tl_pid = toplevel_get_pid(tl);
+		pid_t ancestors[32];
+		size_t n_ancestors = get_ancestor_pids(tl_pid, ancestors, 32);
+		for (size_t i = 0; i < n_ancestors && !target; i++) {
+			struct mint_toplevel *item;
+			wl_list_for_each(item, &server->toplevels, link) {
+				if (item != tl && item->mapped && item->swallowed_by == NULL &&
+				    item->workspace == tl->workspace &&
+				    is_terminal_app(toplevel_get_app_id(item))) {
+					if (ancestors[i] == toplevel_get_pid(item)) {
+						target = item;
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	/* Candidate 3: If tl is not a terminal, find any mapped terminal on the workspace */
+	if (!target && !is_terminal_app(toplevel_get_app_id(tl))) {
+		struct mint_toplevel *item;
+		wl_list_for_each(item, &server->toplevels, link) {
+			if (item != tl && item->mapped && item->swallowed_by == NULL &&
+			    item->workspace == tl->workspace &&
+			    is_terminal_app(toplevel_get_app_id(item))) {
+				target = item;
+				break;
+			}
+		}
+	}
+
+	/* Candidate 4: If tl IS a terminal, find a GUI app on the workspace to swallow it */
+	if (!target && is_terminal_app(toplevel_get_app_id(tl))) {
+		pid_t tl_pid = toplevel_get_pid(tl);
+		struct mint_toplevel *swallower_candidate = NULL;
+		struct mint_toplevel *item;
+		wl_list_for_each(item, &server->toplevels, link) {
+			if (item != tl && item->mapped && item->swallowed_by == NULL &&
+			    item->workspace == tl->workspace && item->swallowing == NULL &&
+			    !is_terminal_app(toplevel_get_app_id(item))) {
+				if (item->last_swallowed == tl) {
+					swallower_candidate = item;
+					break;
+				}
+				pid_t item_ancestors[32];
+				size_t n_item_anc = get_ancestor_pids(toplevel_get_pid(item), item_ancestors, 32);
+				if (has_ancestor_pid(tl_pid, item_ancestors, n_item_anc)) {
+					swallower_candidate = item;
+					break;
+				}
+				if (!swallower_candidate) {
+					swallower_candidate = item;
+				}
+			}
+		}
+		if (swallower_candidate) {
+			swallow_toplevel(server, swallower_candidate, tl);
+			return true;
+		}
+	}
+
+	if (target) {
+		swallow_toplevel(server, tl, target);
+		return true;
+	}
+
+	return false;
 }
 
 static void focus_cycle(struct mint_server *server, bool prev) {
@@ -684,6 +1029,9 @@ static void move_to_workspace(struct mint_server *server, unsigned int ws) {
 	}
 
 	tl->workspace = ws;
+	if (tl->swallowing) {
+		tl->swallowing->workspace = ws;
+	}
 	if (tl->scene_tree) {
 		wlr_scene_node_set_enabled(&tl->scene_tree->node, false);
 	}
@@ -1221,9 +1569,11 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	bool visible = (toplevel->workspace == server->current_workspace);
 	wlr_scene_node_set_enabled(&toplevel->scene_tree->node, visible);
 
+	try_auto_swallow(server, toplevel);
+
 	arrange_windows(server);
 
-	if (visible) {
+	if (visible && toplevel->swallowed_by == NULL) {
 		focus_toplevel(server, toplevel);
 	}
 }
@@ -1245,17 +1595,33 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	}
 
 	bool was_focused = (server->focused_toplevel == toplevel);
-	wl_list_remove(&toplevel->link);
-	wl_list_init(&toplevel->link);
+
+	struct mint_toplevel *restored_term = NULL;
+	if (toplevel->swallowing) {
+		restored_term = toplevel->swallowing;
+		unswallow_toplevel(server, toplevel);
+	}
+	if (toplevel->swallowed_by) {
+		toplevel->swallowed_by->swallowing = NULL;
+		toplevel->swallowed_by = NULL;
+	}
+
+	if (!wl_list_empty(&toplevel->link)) {
+		wl_list_remove(&toplevel->link);
+		wl_list_init(&toplevel->link);
+	}
 
 	if (was_focused) {
 		server->focused_toplevel = NULL;
-		struct mint_toplevel *next_focus = NULL;
-		struct mint_toplevel *tl;
-		wl_list_for_each(tl, &server->toplevels, link) {
-			if (toplevel_is_mapped(tl) && tl->workspace == server->current_workspace) {
-				next_focus = tl;
-				break;
+		struct mint_toplevel *next_focus = restored_term;
+		if (!next_focus || !toplevel_is_mapped(next_focus) || next_focus->workspace != server->current_workspace) {
+			next_focus = NULL;
+			struct mint_toplevel *tl;
+			wl_list_for_each(tl, &server->toplevels, link) {
+				if (toplevel_is_mapped(tl) && tl->workspace == server->current_workspace) {
+					next_focus = tl;
+					break;
+				}
 			}
 		}
 		focus_toplevel(server, next_focus);
@@ -1311,6 +1677,20 @@ static void toplevel_handle_set_title(struct wl_listener *listener, void *data) 
 static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 	struct mint_server *server = toplevel->server;
+
+	if (toplevel->swallowing) {
+		unswallow_toplevel(server, toplevel);
+	}
+	if (toplevel->swallowed_by) {
+		toplevel->swallowed_by->swallowing = NULL;
+		toplevel->swallowed_by = NULL;
+	}
+	struct mint_toplevel *tl_it;
+	wl_list_for_each(tl_it, &server->toplevels, link) {
+		if (tl_it->last_swallowed == toplevel) {
+			tl_it->last_swallowed = NULL;
+		}
+	}
 
 	for (int i = 0; i < NUM_WORKSPACES; i++) {
 		if (server->last_focused_per_workspace[i] == toplevel) {
@@ -1458,9 +1838,11 @@ static void xwayland_surface_map(struct wl_listener *listener, void *data) {
 		toplevel_set_fullscreen(toplevel, true);
 	}
 
+	try_auto_swallow(server, toplevel);
+
 	arrange_windows(server);
 
-	if (visible) {
+	if (visible && toplevel->swallowed_by == NULL) {
 		focus_toplevel(server, toplevel);
 	}
 }
@@ -1490,6 +1872,17 @@ static void xwayland_surface_unmap(struct wl_listener *listener, void *data) {
 	}
 
 	bool was_focused = (server->focused_toplevel == toplevel);
+
+	struct mint_toplevel *restored_term = NULL;
+	if (toplevel->swallowing) {
+		restored_term = toplevel->swallowing;
+		unswallow_toplevel(server, toplevel);
+	}
+	if (toplevel->swallowed_by) {
+		toplevel->swallowed_by->swallowing = NULL;
+		toplevel->swallowed_by = NULL;
+	}
+
 	if (!wl_list_empty(&toplevel->link)) {
 		wl_list_remove(&toplevel->link);
 		wl_list_init(&toplevel->link);
@@ -1502,12 +1895,15 @@ static void xwayland_surface_unmap(struct wl_listener *listener, void *data) {
 
 	if (was_focused) {
 		server->focused_toplevel = NULL;
-		struct mint_toplevel *next_focus = NULL;
-		struct mint_toplevel *tl;
-		wl_list_for_each(tl, &server->toplevels, link) {
-			if (toplevel_is_mapped(tl) && tl->workspace == server->current_workspace) {
-				next_focus = tl;
-				break;
+		struct mint_toplevel *next_focus = restored_term;
+		if (!next_focus || !toplevel_is_mapped(next_focus) || next_focus->workspace != server->current_workspace) {
+			next_focus = NULL;
+			struct mint_toplevel *tl;
+			wl_list_for_each(tl, &server->toplevels, link) {
+				if (toplevel_is_mapped(tl) && tl->workspace == server->current_workspace) {
+					next_focus = tl;
+					break;
+				}
 			}
 		}
 		focus_toplevel(server, next_focus);
@@ -1607,6 +2003,20 @@ static void xwayland_surface_set_geometry(struct wl_listener *listener, void *da
 static void xwayland_surface_destroy(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 	struct mint_server *server = toplevel->server;
+
+	if (toplevel->swallowing) {
+		unswallow_toplevel(server, toplevel);
+	}
+	if (toplevel->swallowed_by) {
+		toplevel->swallowed_by->swallowing = NULL;
+		toplevel->swallowed_by = NULL;
+	}
+	struct mint_toplevel *tl_it;
+	wl_list_for_each(tl_it, &server->toplevels, link) {
+		if (tl_it->last_swallowed == toplevel) {
+			tl_it->last_swallowed = NULL;
+		}
+	}
 
 	for (int i = 0; i < NUM_WORKSPACES; i++) {
 		if (server->last_focused_per_workspace[i] == toplevel) {
@@ -2048,6 +2458,48 @@ static void ipc_execute_command(struct mint_server *server,
 		return;
 	}
 
+	if (strcmp(cmd, "toggle_swallow") == 0 || strcmp(cmd, "swallow") == 0) {
+		if (server->focused_toplevel != NULL) {
+			bool swallowed = toplevel_toggle_swallow(server, server->focused_toplevel);
+			snprintf(resp, resp_size, "OK swallow %s\n", swallowed ? "on" : "off");
+		} else {
+			snprintf(resp, resp_size, "ERROR no focused window\n");
+		}
+		return;
+	}
+
+	if (strcmp(cmd, "get_swallow") == 0) {
+		bool is_swallowing = (server->focused_toplevel != NULL && server->focused_toplevel->swallowing != NULL);
+		snprintf(resp, resp_size, "%d\n", is_swallowing ? 1 : 0);
+		return;
+	}
+
+	if (strcmp(cmd, "toggle_auto_swallow") == 0) {
+		server->auto_swallow = !server->auto_swallow;
+		snprintf(resp, resp_size, "OK auto_swallow %s\n", server->auto_swallow ? "on" : "off");
+		return;
+	}
+
+	if (strncmp(cmd, "auto_swallow", 12) == 0) {
+		const char *arg = cmd + 12;
+		while (*arg == ' ') arg++;
+		if (*arg == '\0') {
+			snprintf(resp, resp_size, "%d\n", server->auto_swallow ? 1 : 0);
+		} else if (strcmp(arg, "toggle") == 0) {
+			server->auto_swallow = !server->auto_swallow;
+			snprintf(resp, resp_size, "OK auto_swallow %s\n", server->auto_swallow ? "on" : "off");
+		} else if (strcmp(arg, "on") == 0 || strcmp(arg, "1") == 0 || strcmp(arg, "true") == 0) {
+			server->auto_swallow = true;
+			snprintf(resp, resp_size, "OK auto_swallow on\n");
+		} else if (strcmp(arg, "off") == 0 || strcmp(arg, "0") == 0 || strcmp(arg, "false") == 0) {
+			server->auto_swallow = false;
+			snprintf(resp, resp_size, "OK auto_swallow off\n");
+		} else {
+			snprintf(resp, resp_size, "ERROR expected on/off/toggle\n");
+		}
+		return;
+	}
+
 	if (strncmp(cmd, "mfact", 5) == 0) {
 		const char *arg = cmd + 5;
 		while (*arg == ' ') arg++;
@@ -2103,8 +2555,10 @@ static void ipc_execute_command(struct mint_server *server,
 		}
 		const char *title = server->focused_toplevel ?
 			toplevel_get_title(server->focused_toplevel) : "";
-		snprintf(resp, resp_size, "{\"workspace\":%u,\"windows\":%d,\"title\":\"%s\",\"locked\":%s}\n",
-			server->current_workspace, count, title ? title : "", server->locked ? "true" : "false");
+		bool is_swallowing = (server->focused_toplevel != NULL && server->focused_toplevel->swallowing != NULL);
+		snprintf(resp, resp_size, "{\"workspace\":%u,\"windows\":%d,\"title\":\"%s\",\"locked\":%s,\"swallowing\":%s,\"auto_swallow\":%s}\n",
+			server->current_workspace, count, title ? title : "", server->locked ? "true" : "false",
+			is_swallowing ? "true" : "false", server->auto_swallow ? "true" : "false");
 		return;
 	}
 
@@ -2125,6 +2579,10 @@ static void ipc_execute_command(struct mint_server *server,
 			"  focus <next|prev|master>  Change window focus\n"
 			"  swap                      Swap focused window with master\n"
 			"  fullscreen                Toggle fullscreen for focused window\n"
+			"  toggle_swallow            Toggle window swallow\n"
+			"  get_swallow               Get swallowing state (0 or 1)\n"
+			"  toggle_auto_swallow       Toggle auto-swallow on/off\n"
+			"  auto_swallow <on|off|toggle> Control auto-swallow\n"
 			"  mfact <factor>            Change master factor (0.1 - 0.9)\n"
 			"  get_workspace             Get current workspace number\n"
 			"  get_workspaces            Get workspace list with [active]\n"
@@ -2603,6 +3061,7 @@ int main(int argc, char *argv[]) {
 	server.current_workspace = 1;
 	server.prev_workspace = 1;
 	server.mfact = DEFAULT_MFACT;
+	server.auto_swallow = true;
 	server.ipc_fd = -1;
 	g_server = &server;
 

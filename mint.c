@@ -1,5 +1,37 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
+
+/* Build configuration defaults (can be overridden via compiler -D flags from config.mk) */
+#ifndef CONFIG_XWAYLAND
+#define CONFIG_XWAYLAND 1
+#endif
+#ifndef CONFIG_SESSION_LOCK
+#define CONFIG_SESSION_LOCK 1
+#endif
+#ifndef CONFIG_LAYER_SHELL
+#define CONFIG_LAYER_SHELL 1
+#endif
+#ifndef CONFIG_SCREENCOPY
+#define CONFIG_SCREENCOPY 1
+#endif
+#ifndef CONFIG_XDG_OUTPUT
+#define CONFIG_XDG_OUTPUT 1
+#endif
+#ifndef CONFIG_XDG_DECORATION
+#define CONFIG_XDG_DECORATION 1
+#endif
+#ifndef CONFIG_VIEWPORTER
+#define CONFIG_VIEWPORTER 1
+#endif
+#ifndef CONFIG_DATA_CONTROL
+#define CONFIG_DATA_CONTROL 1
+#endif
+#ifndef CONFIG_PRIMARY_SELECTION
+#define CONFIG_PRIMARY_SELECTION 1
+#endif
+#ifndef CONFIG_SWALLOWING
+#define CONFIG_SWALLOWING 1
+#endif
 #include <assert.h>
 #include <getopt.h>
 #include <stdbool.h>
@@ -33,18 +65,45 @@
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
+
+#if CONFIG_XDG_DECORATION
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
+#endif
+
+#if CONFIG_LAYER_SHELL
 #include <wlr/types/wlr_layer_shell_v1.h>
+#endif
+
+#if CONFIG_XDG_OUTPUT
 #include <wlr/types/wlr_xdg_output_v1.h>
+#endif
+
+#if CONFIG_SCREENCOPY
 #include <wlr/types/wlr_screencopy_v1.h>
+#endif
+
+#if CONFIG_SESSION_LOCK
 #include <wlr/types/wlr_session_lock_v1.h>
+#endif
+
+#if CONFIG_DATA_CONTROL
 #include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_ext_data_control_v1.h>
+#endif
+
+#if CONFIG_PRIMARY_SELECTION
 #include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
+#endif
+
+#if CONFIG_VIEWPORTER
 #include <wlr/types/wlr_viewporter.h>
+#endif
+
+#if CONFIG_XWAYLAND
 #include <wlr/xwayland.h>
+#endif
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 
@@ -66,27 +125,38 @@ struct mint_server {
 	struct wlr_scene_tree *scene_tree_top;
 	struct wlr_scene_tree *scene_tree_fullscreen;
 	struct wlr_scene_tree *scene_tree_overlay;
+#if CONFIG_SESSION_LOCK
 	struct wlr_scene_tree *scene_tree_lock;
 	struct wlr_scene_rect *lock_bg;
+#endif
 
 	struct wlr_xdg_shell *xdg_shell;
 	struct wl_listener new_xdg_toplevel;
 	struct wl_listener new_xdg_popup;
 
+#if CONFIG_XDG_DECORATION
 	struct wlr_xdg_decoration_manager_v1 *xdg_decoration_mgr;
 	struct wl_listener new_xdg_decoration;
 	struct wlr_server_decoration_manager *server_decoration_mgr;
+#endif
 
 	struct wlr_compositor *compositor;
+#if CONFIG_XWAYLAND
 	struct wlr_xwayland *xwayland;
 	struct wl_listener xwayland_ready;
 	struct wl_listener new_xwayland_surface;
+#endif
 
+#if CONFIG_LAYER_SHELL
 	struct wlr_layer_shell_v1 *layer_shell;
 	struct wl_listener new_layer_shell_surface;
+#endif
 
+#if CONFIG_SCREENCOPY
 	struct wlr_screencopy_manager_v1 *screencopy_mgr;
+#endif
 
+#if CONFIG_SESSION_LOCK
 	struct wlr_session_lock_manager_v1 *session_lock_mgr;
 	struct wl_listener new_session_lock;
 	struct wlr_session_lock_v1 *session_lock;
@@ -94,6 +164,7 @@ struct mint_server {
 	struct wl_listener session_lock_unlock;
 	struct wl_listener session_lock_destroy;
 	struct wl_list lock_surfaces;
+#endif
 	bool locked;
 
 	struct wl_list toplevels;
@@ -102,7 +173,9 @@ struct mint_server {
 	unsigned int prev_workspace;
 	struct mint_toplevel *last_focused_per_workspace[NUM_WORKSPACES];
 	double mfact;
+#if CONFIG_SWALLOWING
 	bool auto_swallow;
+#endif
 
 	struct wlr_cursor *cursor;
 	struct wlr_xcursor_manager *cursor_mgr;
@@ -117,11 +190,15 @@ struct mint_server {
 	struct wl_listener request_cursor;
 	struct wl_listener pointer_focus_change;
 	struct wl_listener request_set_selection;
+#if CONFIG_PRIMARY_SELECTION
 	struct wl_listener request_set_primary_selection;
+#endif
 	struct wl_list keyboards;
 
 	struct wlr_output_layout *output_layout;
+#if CONFIG_XDG_OUTPUT
 	struct wlr_xdg_output_manager_v1 *xdg_output_manager;
+#endif
 	struct wl_list outputs;
 	struct wl_listener new_output;
 
@@ -145,6 +222,7 @@ struct mint_output {
 	struct wlr_box usable_area;
 };
 
+#if CONFIG_SESSION_LOCK
 struct mint_session_lock_surface {
 	struct wl_list link;
 	struct mint_server *server;
@@ -153,11 +231,14 @@ struct mint_session_lock_surface {
 	struct wlr_scene_tree *scene_tree;
 	struct wl_listener destroy;
 };
+#endif
 
 enum mint_toplevel_type {
 	MINT_TOPLEVEL_XDG,
+#if CONFIG_XWAYLAND
 	MINT_TOPLEVEL_XWAYLAND,
 	MINT_TOPLEVEL_XWAYLAND_UNMANAGED,
+#endif
 };
 
 struct mint_toplevel {
@@ -166,23 +247,31 @@ struct mint_toplevel {
 	enum mint_toplevel_type type;
 
 	struct wlr_xdg_toplevel *xdg_toplevel;
+#if CONFIG_XWAYLAND
 	struct wlr_xwayland_surface *xwayland_surface;
+#endif
 	struct wlr_scene_tree *scene_tree;
 
 	bool mapped;
 	bool is_fullscreen;
+#if CONFIG_SWALLOWING
 	bool swallowee_was_fullscreen;
+#endif
 	unsigned int workspace;
 	int pending_x, pending_y;
 	int pending_width, pending_height;
 
+#if CONFIG_SWALLOWING
 	struct mint_toplevel *swallowed_by;
 	struct mint_toplevel *swallowing;
 	struct mint_toplevel *last_swallowed;
+#endif
 
+#if CONFIG_XDG_DECORATION
 	struct wlr_xdg_toplevel_decoration_v1 *decoration;
 	struct wl_listener decoration_request_mode;
 	struct wl_listener decoration_destroy;
+#endif
 
 	struct wl_listener map;
 	struct wl_listener unmap;
@@ -192,15 +281,20 @@ struct mint_toplevel {
 	struct wl_listener request_resize;
 	struct wl_listener request_maximize;
 	struct wl_listener request_fullscreen;
+#if CONFIG_XWAYLAND
 	struct wl_listener request_configure;
 	struct wl_listener request_activate;
 	struct wl_listener associate;
 	struct wl_listener dissociate;
+#endif
 	struct wl_listener set_title;
+#if CONFIG_XWAYLAND
 	struct wl_listener set_override_redirect;
 	struct wl_listener set_geometry;
+#endif
 };
 
+#if CONFIG_LAYER_SHELL
 struct mint_layer_surface {
 	struct wl_list link;
 	struct mint_server *server;
@@ -213,6 +307,7 @@ struct mint_layer_surface {
 	struct wl_listener surface_commit;
 	struct wl_listener destroy;
 };
+#endif
 
 struct mint_popup {
 	struct wlr_xdg_popup *xdg_popup;
@@ -251,11 +346,21 @@ static void ipc_broadcast_state(struct mint_server *server);
 static void ipc_execute_command(struct mint_server *server,
 		struct mint_ipc_client *client,
 		const char *cmd, char *resp, size_t resp_size);
+#if CONFIG_SWALLOWING
 static void swallow_toplevel(struct mint_server *server, struct mint_toplevel *swallower, struct mint_toplevel *swallowee);
 static void unswallow_toplevel(struct mint_server *server, struct mint_toplevel *swallower);
 static void try_auto_swallow(struct mint_server *server, struct mint_toplevel *swallower);
 static bool toplevel_toggle_swallow(struct mint_server *server, struct mint_toplevel *tl);
+#else
+static inline void unswallow_toplevel(struct mint_server *server, struct mint_toplevel *swallower) {
+	(void)server; (void)swallower;
+}
+static inline void try_auto_swallow(struct mint_server *server, struct mint_toplevel *swallower) {
+	(void)server; (void)swallower;
+}
+#endif
 
+#if CONFIG_LAYER_SHELL
 static struct wlr_scene_tree *get_layer_tree(struct mint_server *server,
 		enum zwlr_layer_shell_v1_layer layer) {
 	switch (layer) {
@@ -270,6 +375,7 @@ static struct wlr_scene_tree *get_layer_tree(struct mint_server *server,
 	}
 	return server->scene_tree_top;
 }
+#endif
 
 static struct mint_output *get_active_output(struct mint_server *server) {
 	if (wl_list_empty(&server->outputs)) {
@@ -286,18 +392,25 @@ static struct mint_output *get_active_output(struct mint_server *server) {
 
 static struct wlr_surface *toplevel_get_surface(struct mint_toplevel *tl) {
 	if (!tl) return NULL;
+#if CONFIG_XWAYLAND
 	if (tl->type == MINT_TOPLEVEL_XWAYLAND || tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) {
 		return tl->xwayland_surface ? tl->xwayland_surface->surface : NULL;
 	}
+#endif
 	return (tl->xdg_toplevel && tl->xdg_toplevel->base) ? tl->xdg_toplevel->base->surface : NULL;
 }
 
 static inline bool toplevel_is_mapped(struct mint_toplevel *tl) {
+#if CONFIG_SWALLOWING
 	return tl != NULL && tl->mapped && tl->swallowed_by == NULL;
+#else
+	return tl != NULL && tl->mapped;
+#endif
 }
 
 static const char *toplevel_get_title(struct mint_toplevel *tl) {
 	if (!tl) return "";
+#if CONFIG_XWAYLAND
 	if (tl->type == MINT_TOPLEVEL_XWAYLAND || tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) {
 		if (tl->xwayland_surface && tl->xwayland_surface->title && tl->xwayland_surface->title[0] != '\0') {
 			return tl->xwayland_surface->title;
@@ -307,6 +420,7 @@ static const char *toplevel_get_title(struct mint_toplevel *tl) {
 		}
 		return "";
 	}
+#endif
 	if (tl->xdg_toplevel) {
 		if (tl->xdg_toplevel->title && tl->xdg_toplevel->title[0] != '\0') {
 			return tl->xdg_toplevel->title;
@@ -323,6 +437,7 @@ static const char *toplevel_get_app_id(struct mint_toplevel *tl) {
 	if (tl->type == MINT_TOPLEVEL_XDG && tl->xdg_toplevel && tl->xdg_toplevel->app_id) {
 		return tl->xdg_toplevel->app_id;
 	}
+#if CONFIG_XWAYLAND
 	if ((tl->type == MINT_TOPLEVEL_XWAYLAND || tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) && tl->xwayland_surface) {
 		if (tl->xwayland_surface->class && tl->xwayland_surface->class[0] != '\0') {
 			return tl->xwayland_surface->class;
@@ -331,6 +446,7 @@ static const char *toplevel_get_app_id(struct mint_toplevel *tl) {
 			return tl->xwayland_surface->instance;
 		}
 	}
+#endif
 	return "";
 }
 
@@ -342,12 +458,15 @@ static pid_t toplevel_get_pid(struct mint_toplevel *tl) {
 		wl_client_get_credentials(tl->xdg_toplevel->base->client->client, &pid, NULL, NULL);
 		return pid;
 	}
+#if CONFIG_XWAYLAND
 	if ((tl->type == MINT_TOPLEVEL_XWAYLAND || tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) && tl->xwayland_surface) {
 		return tl->xwayland_surface->pid;
 	}
+#endif
 	return 0;
 }
 
+#if CONFIG_SWALLOWING
 static pid_t get_parent_pid(pid_t pid) {
 	if (pid <= 1) return 0;
 	char path[64];
@@ -423,6 +542,7 @@ static bool is_terminal_app(const char *app_id) {
 	}
 	return false;
 }
+#endif
 
 static void toplevel_set_size_and_position(struct mint_toplevel *tl, int x, int y, int width, int height) {
 	tl->pending_x = x;
@@ -430,6 +550,7 @@ static void toplevel_set_size_and_position(struct mint_toplevel *tl, int x, int 
 	tl->pending_width = width;
 	tl->pending_height = height;
 
+#if CONFIG_XWAYLAND
 	if (tl->type == MINT_TOPLEVEL_XWAYLAND || tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) {
 		if (tl->scene_tree) {
 			wlr_scene_node_set_position(&tl->scene_tree->node, x, y);
@@ -439,7 +560,9 @@ static void toplevel_set_size_and_position(struct mint_toplevel *tl, int x, int 
 		if (tl->xwayland_surface) {
 			wlr_xwayland_surface_configure(tl->xwayland_surface, x, y, width, height);
 		}
-	} else {
+	} else
+#endif
+	{
 		if (tl->scene_tree && tl->xdg_toplevel && tl->xdg_toplevel->base) {
 			wlr_scene_node_set_position(&tl->scene_tree->node,
 				x - tl->xdg_toplevel->base->geometry.x,
@@ -453,6 +576,7 @@ static void toplevel_set_size_and_position(struct mint_toplevel *tl, int x, int 
 
 static void toplevel_set_activated(struct mint_toplevel *tl, bool activated) {
 	if (!tl) return;
+#if CONFIG_XWAYLAND
 	if (tl->type == MINT_TOPLEVEL_XWAYLAND || tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) {
 		if (tl->xwayland_surface) {
 			wlr_xwayland_surface_activate(tl->xwayland_surface, activated);
@@ -460,7 +584,9 @@ static void toplevel_set_activated(struct mint_toplevel *tl, bool activated) {
 				wlr_xwayland_surface_restack(tl->xwayland_surface, NULL, XCB_STACK_MODE_ABOVE);
 			}
 		}
-	} else {
+	} else
+#endif
+	{
 		if (tl->xdg_toplevel) {
 			wlr_xdg_toplevel_set_activated(tl->xdg_toplevel, activated);
 		}
@@ -469,11 +595,14 @@ static void toplevel_set_activated(struct mint_toplevel *tl, bool activated) {
 
 static void toplevel_close(struct mint_toplevel *tl) {
 	if (!tl) return;
+#if CONFIG_XWAYLAND
 	if (tl->type == MINT_TOPLEVEL_XWAYLAND || tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) {
 		if (tl->xwayland_surface) {
 			wlr_xwayland_surface_close(tl->xwayland_surface);
 		}
-	} else {
+	} else
+#endif
+	{
 		if (tl->xdg_toplevel) {
 			wlr_xdg_toplevel_send_close(tl->xdg_toplevel);
 		}
@@ -496,11 +625,14 @@ static void toplevel_set_fullscreen(struct mint_toplevel *tl, bool fullscreen) {
 		}
 	}
 
+#if CONFIG_XWAYLAND
 	if (tl->type == MINT_TOPLEVEL_XWAYLAND || tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) {
 		if (tl->xwayland_surface) {
 			wlr_xwayland_surface_set_fullscreen(tl->xwayland_surface, fullscreen);
 		}
-	} else {
+	} else
+#endif
+	{
 		if (tl->xdg_toplevel) {
 			wlr_xdg_toplevel_set_fullscreen(tl->xdg_toplevel, fullscreen);
 			wlr_xdg_toplevel_set_tiled(tl->xdg_toplevel, fullscreen ? 0 :
@@ -577,6 +709,7 @@ static void arrange_layers(struct mint_output *output) {
 	wlr_output_layout_get_box(server->output_layout, output->wlr_output, &full_area);
 	struct wlr_box usable_area = full_area;
 
+#if CONFIG_LAYER_SHELL
 	static const enum zwlr_layer_shell_v1_layer layers[] = {
 		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
 		ZWLR_LAYER_SHELL_V1_LAYER_TOP,
@@ -592,6 +725,7 @@ static void arrange_layers(struct mint_output *output) {
 			}
 		}
 	}
+#endif
 
 	struct wlr_box old_area = output->usable_area;
 	output->usable_area = usable_area;
@@ -604,9 +738,11 @@ static void focus_toplevel(struct mint_server *server, struct mint_toplevel *top
 	if (server->locked) {
 		return;
 	}
+#if CONFIG_SWALLOWING
 	if (toplevel && toplevel->swallowed_by != NULL) {
 		toplevel = toplevel->swallowed_by;
 	}
+#endif
 	struct wlr_seat *seat = server->seat;
 
 	if (server->focused_toplevel && server->focused_toplevel != toplevel) {
@@ -636,6 +772,7 @@ static void focus_toplevel(struct mint_server *server, struct mint_toplevel *top
 	ipc_broadcast_state(server);
 }
 
+#if CONFIG_SWALLOWING
 static void swallow_toplevel(struct mint_server *server, struct mint_toplevel *swallower, struct mint_toplevel *swallowee) {
 	if (!swallower || !swallowee || swallower == swallowee) return;
 
@@ -722,7 +859,10 @@ static void unswallow_toplevel(struct mint_server *server, struct mint_toplevel 
 }
 
 static void try_auto_swallow(struct mint_server *server, struct mint_toplevel *swallower) {
-	if (!server->auto_swallow || !swallower || swallower->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) return;
+	if (!server->auto_swallow || !swallower) return;
+#if CONFIG_XWAYLAND
+	if (swallower->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) return;
+#endif
 
 	const char *app_id = toplevel_get_app_id(swallower);
 	if (is_terminal_app(app_id)) {
@@ -861,6 +1001,8 @@ static bool toplevel_toggle_swallow(struct mint_server *server, struct mint_topl
 
 	return false;
 }
+
+#endif
 
 static void focus_cycle(struct mint_server *server, bool prev) {
 	if (server->locked || wl_list_empty(&server->toplevels)) {
@@ -1029,9 +1171,11 @@ static void move_to_workspace(struct mint_server *server, unsigned int ws) {
 	}
 
 	tl->workspace = ws;
+#if CONFIG_SWALLOWING
 	if (tl->swallowing) {
 		tl->swallowing->workspace = ws;
 	}
+#endif
 	if (tl->scene_tree) {
 		wlr_scene_node_set_enabled(&tl->scene_tree->node, false);
 	}
@@ -1227,12 +1371,14 @@ static void seat_request_set_selection(struct wl_listener *listener, void *data)
 	wlr_seat_set_selection(server->seat, event->source, event->serial);
 }
 
+#if CONFIG_PRIMARY_SELECTION
 static void seat_request_set_primary_selection(struct wl_listener *listener, void *data) {
 	struct mint_server *server = wl_container_of(
 			listener, server, request_set_primary_selection);
 	struct wlr_seat_request_set_primary_selection_event *event = data;
 	wlr_seat_set_primary_selection(server->seat, event->source, event->serial);
 }
+#endif
 
 static struct mint_toplevel *desktop_toplevel_at(
 		struct mint_server *server, double lx, double ly,
@@ -1356,6 +1502,7 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 	const struct wlr_output_event_request_state *event = data;
 	wlr_output_commit_state(output->wlr_output, event->state);
 	arrange_layers(output);
+#if CONFIG_SESSION_LOCK
 	if (output->server->locked) {
 		update_lock_bg(output->server);
 		struct mint_session_lock_surface *surface;
@@ -1369,6 +1516,7 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 			}
 		}
 	}
+#endif
 }
 
 static void output_destroy(struct wl_listener *listener, void *data) {
@@ -1431,6 +1579,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	}
 }
 
+#if CONFIG_LAYER_SHELL
 /* Layer shell management (for external bars, docks, wallpapers) */
 static void layer_surface_handle_commit(struct wl_listener *listener, void *data) {
 	struct mint_layer_surface *layer_surface = wl_container_of(listener, layer_surface, surface_commit);
@@ -1545,6 +1694,8 @@ static void server_new_layer_shell_surface(struct wl_listener *listener, void *d
 	wl_list_insert(&output->layers, &layer_surface->link);
 }
 
+#endif
+
 /* XDG Shell management */
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, map);
@@ -1552,10 +1703,12 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
 	toplevel->mapped = true;
 
+#if CONFIG_XDG_DECORATION
 	if (toplevel->decoration) {
 		wlr_xdg_toplevel_decoration_v1_set_mode(toplevel->decoration,
 			WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 	}
+#endif
 
 	wl_list_insert(&server->toplevels, &toplevel->link);
 
@@ -1573,7 +1726,12 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
 	arrange_windows(server);
 
-	if (visible && toplevel->swallowed_by == NULL) {
+#if CONFIG_SWALLOWING
+	if (visible && toplevel->swallowed_by == NULL)
+#else
+	if (visible)
+#endif
+	{
 		focus_toplevel(server, toplevel);
 	}
 }
@@ -1597,6 +1755,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	bool was_focused = (server->focused_toplevel == toplevel);
 
 	struct mint_toplevel *restored_term = NULL;
+#if CONFIG_SWALLOWING
 	if (toplevel->swallowing) {
 		restored_term = toplevel->swallowing;
 		unswallow_toplevel(server, toplevel);
@@ -1605,6 +1764,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		toplevel->swallowed_by->swallowing = NULL;
 		toplevel->swallowed_by = NULL;
 	}
+#endif
 
 	if (!wl_list_empty(&toplevel->link)) {
 		wl_list_remove(&toplevel->link);
@@ -1634,10 +1794,12 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
 
 	if (toplevel->xdg_toplevel->base->initial_commit) {
+#if CONFIG_XDG_DECORATION
 		if (toplevel->decoration) {
 			wlr_xdg_toplevel_decoration_v1_set_mode(toplevel->decoration,
 				WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 		}
+#endif
 		struct mint_output *output = get_active_output(toplevel->server);
 		struct wlr_box full_area = {0};
 		struct wlr_box area = {0};
@@ -1678,6 +1840,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 	struct mint_server *server = toplevel->server;
 
+#if CONFIG_SWALLOWING
 	if (toplevel->swallowing) {
 		unswallow_toplevel(server, toplevel);
 	}
@@ -1691,6 +1854,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 			tl_it->last_swallowed = NULL;
 		}
 	}
+#endif
 
 	for (int i = 0; i < NUM_WORKSPACES; i++) {
 		if (server->last_focused_per_workspace[i] == toplevel) {
@@ -1713,12 +1877,14 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->request_resize.link);
 	wl_list_remove(&toplevel->request_maximize.link);
 	wl_list_remove(&toplevel->request_fullscreen.link);
+#if CONFIG_XDG_DECORATION
 	if (!wl_list_empty(&toplevel->decoration_destroy.link)) {
 		wl_list_remove(&toplevel->decoration_destroy.link);
 	}
 	if (!wl_list_empty(&toplevel->decoration_request_mode.link)) {
 		wl_list_remove(&toplevel->decoration_request_mode.link);
 	}
+#endif
 	if (!wl_list_empty(&toplevel->set_title.link)) {
 		wl_list_remove(&toplevel->set_title.link);
 	}
@@ -1767,15 +1933,21 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	toplevel->xdg_toplevel = xdg_toplevel;
 	toplevel->workspace = server->current_workspace;
 	wl_list_init(&toplevel->link);
+#if CONFIG_XDG_DECORATION
 	wl_list_init(&toplevel->decoration_request_mode.link);
 	wl_list_init(&toplevel->decoration_destroy.link);
+#endif
+#if CONFIG_XWAYLAND
 	wl_list_init(&toplevel->request_configure.link);
 	wl_list_init(&toplevel->request_activate.link);
 	wl_list_init(&toplevel->associate.link);
 	wl_list_init(&toplevel->dissociate.link);
+#endif
 	wl_list_init(&toplevel->set_title.link);
+#if CONFIG_XWAYLAND
 	wl_list_init(&toplevel->set_override_redirect.link);
 	wl_list_init(&toplevel->set_geometry.link);
+#endif
 
 	toplevel->scene_tree =
 		wlr_scene_xdg_surface_create(server->scene_tree_windows, xdg_toplevel->base);
@@ -1805,6 +1977,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xdg_toplevel->events.request_fullscreen, &toplevel->request_fullscreen);
 }
 
+#if CONFIG_XWAYLAND
 static void xwayland_surface_map(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, map);
 	struct mint_server *server = toplevel->server;
@@ -1842,7 +2015,12 @@ static void xwayland_surface_map(struct wl_listener *listener, void *data) {
 
 	arrange_windows(server);
 
-	if (visible && toplevel->swallowed_by == NULL) {
+#if CONFIG_SWALLOWING
+	if (visible && toplevel->swallowed_by == NULL)
+#else
+	if (visible)
+#endif
+	{
 		focus_toplevel(server, toplevel);
 	}
 }
@@ -1874,6 +2052,7 @@ static void xwayland_surface_unmap(struct wl_listener *listener, void *data) {
 	bool was_focused = (server->focused_toplevel == toplevel);
 
 	struct mint_toplevel *restored_term = NULL;
+#if CONFIG_SWALLOWING
 	if (toplevel->swallowing) {
 		restored_term = toplevel->swallowing;
 		unswallow_toplevel(server, toplevel);
@@ -1882,6 +2061,7 @@ static void xwayland_surface_unmap(struct wl_listener *listener, void *data) {
 		toplevel->swallowed_by->swallowing = NULL;
 		toplevel->swallowed_by = NULL;
 	}
+#endif
 
 	if (!wl_list_empty(&toplevel->link)) {
 		wl_list_remove(&toplevel->link);
@@ -2004,6 +2184,7 @@ static void xwayland_surface_destroy(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 	struct mint_server *server = toplevel->server;
 
+#if CONFIG_SWALLOWING
 	if (toplevel->swallowing) {
 		unswallow_toplevel(server, toplevel);
 	}
@@ -2017,6 +2198,7 @@ static void xwayland_surface_destroy(struct wl_listener *listener, void *data) {
 			tl_it->last_swallowed = NULL;
 		}
 	}
+#endif
 
 	for (int i = 0; i < NUM_WORKSPACES; i++) {
 		if (server->last_focused_per_workspace[i] == toplevel) {
@@ -2091,8 +2273,10 @@ static void handle_new_xwayland_surface(struct wl_listener *listener, void *data
 	toplevel->workspace = server->current_workspace;
 
 	wl_list_init(&toplevel->link);
+#if CONFIG_XDG_DECORATION
 	wl_list_init(&toplevel->decoration_request_mode.link);
 	wl_list_init(&toplevel->decoration_destroy.link);
+#endif
 	wl_list_init(&toplevel->map.link);
 	wl_list_init(&toplevel->unmap.link);
 	wl_list_init(&toplevel->commit.link);
@@ -2156,6 +2340,8 @@ static void handle_xwayland_ready(struct wl_listener *listener, void *data) {
 	}
 }
 
+#endif
+
 static void xdg_popup_commit(struct wl_listener *listener, void *data) {
 	struct mint_popup *popup = wl_container_of(listener, popup, commit);
 	if (popup->xdg_popup->base->initial_commit) {
@@ -2183,10 +2369,12 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 	if (parent_xdg != NULL) {
 		parent_tree = parent_xdg->data;
 	} else {
+#if CONFIG_LAYER_SHELL
 		struct wlr_layer_surface_v1 *parent_layer = wlr_layer_surface_v1_try_from_wlr_surface(xdg_popup->parent);
 		if (parent_layer != NULL) {
 			parent_tree = parent_layer->data;
 		}
+#endif
 	}
 	if (parent_tree == NULL) {
 		free(popup);
@@ -2201,6 +2389,7 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xdg_popup->events.destroy, &popup->destroy);
 }
 
+#if CONFIG_XDG_DECORATION
 /* Server-side decoration negotiation (request clients not to draw titlebars) */
 static void xdg_decoration_handle_request_mode(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, decoration_request_mode);
@@ -2243,6 +2432,8 @@ static void server_new_xdg_decoration(struct wl_listener *listener, void *data) 
 			WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 	}
 }
+
+#endif
 
 /* IPC implementation */
 static void ipc_client_destroy(struct mint_ipc_client *client) {
@@ -2458,6 +2649,7 @@ static void ipc_execute_command(struct mint_server *server,
 		return;
 	}
 
+#if CONFIG_SWALLOWING
 	if (strcmp(cmd, "toggle_swallow") == 0 || strcmp(cmd, "swallow") == 0) {
 		if (server->focused_toplevel != NULL) {
 			bool swallowed = toplevel_toggle_swallow(server, server->focused_toplevel);
@@ -2499,6 +2691,7 @@ static void ipc_execute_command(struct mint_server *server,
 		}
 		return;
 	}
+#endif
 
 	if (strncmp(cmd, "mfact", 5) == 0) {
 		const char *arg = cmd + 5;
@@ -2555,10 +2748,16 @@ static void ipc_execute_command(struct mint_server *server,
 		}
 		const char *title = server->focused_toplevel ?
 			toplevel_get_title(server->focused_toplevel) : "";
+#if CONFIG_SWALLOWING
 		bool is_swallowing = (server->focused_toplevel != NULL && server->focused_toplevel->swallowing != NULL);
+		bool auto_swallow_val = server->auto_swallow;
+#else
+		bool is_swallowing = false;
+		bool auto_swallow_val = false;
+#endif
 		snprintf(resp, resp_size, "{\"workspace\":%u,\"windows\":%d,\"title\":\"%s\",\"locked\":%s,\"swallowing\":%s,\"auto_swallow\":%s}\n",
 			server->current_workspace, count, title ? title : "", server->locked ? "true" : "false",
-			is_swallowing ? "true" : "false", server->auto_swallow ? "true" : "false");
+			is_swallowing ? "true" : "false", auto_swallow_val ? "true" : "false");
 		return;
 	}
 
@@ -2743,6 +2942,7 @@ static void ipc_finish(struct mint_server *server) {
 	}
 }
 
+#if CONFIG_SESSION_LOCK
 /* Session Lock (ext-session-lock-v1) */
 static void update_lock_bg(struct mint_server *server) {
 	if (!server->lock_bg) return;
@@ -2925,20 +3125,28 @@ static void server_new_session_lock(struct wl_listener *listener, void *data) {
 	wlr_session_lock_v1_send_locked(lock);
 }
 
+#else
+static inline void update_lock_bg(struct mint_server *server) {
+	(void)server;
+}
+#endif
 static struct mint_server *g_server = NULL;
 
 static void handle_sigchld(int signo) {
 	(void)signo;
 	siginfo_t in;
 	while (!waitid(P_ALL, 0, &in, WEXITED | WNOHANG | WNOWAIT) && in.si_pid) {
+#if CONFIG_XWAYLAND
 		if (g_server && g_server->xwayland && g_server->xwayland->server &&
 				in.si_pid == g_server->xwayland->server->pid) {
 			break;
 		}
+#endif
 		waitpid(in.si_pid, NULL, 0);
 	}
 }
 
+#if CONFIG_SCREENCOPY
 static const char *const screencopy_allowed_clients[] = {
 	"grim",
 	"xdg-desktop-portal-wlr",
@@ -3041,6 +3249,8 @@ static bool server_global_filter(const struct wl_client *client,
 	return true;
 }
 
+#endif
+
 int main(int argc, char *argv[]) {
 	wlr_log_init(WLR_INFO, NULL);
 	char *startup_cmd = NULL;
@@ -3061,7 +3271,9 @@ int main(int argc, char *argv[]) {
 	server.current_workspace = 1;
 	server.prev_workspace = 1;
 	server.mfact = DEFAULT_MFACT;
+#if CONFIG_SWALLOWING
 	server.auto_swallow = true;
+#endif
 	server.ipc_fd = -1;
 	g_server = &server;
 
@@ -3096,13 +3308,26 @@ int main(int argc, char *argv[]) {
 	server.compositor = wlr_compositor_create(server.wl_display, 5, server.renderer);
 	wlr_subcompositor_create(server.wl_display);
 	wlr_data_device_manager_create(server.wl_display);
+
+#if CONFIG_DATA_CONTROL
 	wlr_data_control_manager_v1_create(server.wl_display);
 	wlr_ext_data_control_manager_v1_create(server.wl_display, 1);
+#endif
+
+#if CONFIG_PRIMARY_SELECTION
 	wlr_primary_selection_v1_device_manager_create(server.wl_display);
+#endif
+
+#if CONFIG_VIEWPORTER
 	wlr_viewporter_create(server.wl_display);
+#endif
+
+#if CONFIG_SCREENCOPY
 	server.screencopy_mgr = wlr_screencopy_manager_v1_create(server.wl_display);
 	wl_display_set_global_filter(server.wl_display, server_global_filter, &server);
+#endif
 
+#if CONFIG_XWAYLAND
 	server.xwayland = wlr_xwayland_create(server.wl_display, server.compositor, true);
 	if (server.xwayland) {
 		server.xwayland_ready.notify = handle_xwayland_ready;
@@ -3115,10 +3340,14 @@ int main(int argc, char *argv[]) {
 	} else {
 		wlr_log(WLR_ERROR, "failed to start Xwayland");
 	}
+#endif
 
 	server.output_layout = wlr_output_layout_create(server.wl_display);
+
+#if CONFIG_XDG_OUTPUT
 	server.xdg_output_manager =
 		wlr_xdg_output_manager_v1_create(server.wl_display, server.output_layout);
+#endif
 
 	wl_list_init(&server.outputs);
 	server.new_output.notify = server_new_output;
@@ -3134,10 +3363,12 @@ int main(int argc, char *argv[]) {
 	server.scene_tree_top = wlr_scene_tree_create(&server.scene->tree);
 	server.scene_tree_fullscreen = wlr_scene_tree_create(&server.scene->tree);
 	server.scene_tree_overlay = wlr_scene_tree_create(&server.scene->tree);
+#if CONFIG_SESSION_LOCK
 	server.scene_tree_lock = wlr_scene_tree_create(&server.scene->tree);
 	static const float lock_black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 	server.lock_bg = wlr_scene_rect_create(server.scene_tree_lock, 0, 0, lock_black);
 	wlr_scene_node_set_enabled(&server.lock_bg->node, false);
+#endif
 
 	wl_list_init(&server.toplevels);
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
@@ -3146,6 +3377,7 @@ int main(int argc, char *argv[]) {
 	server.new_xdg_popup.notify = server_new_xdg_popup;
 	wl_signal_add(&server.xdg_shell->events.new_popup, &server.new_xdg_popup);
 
+#if CONFIG_XDG_DECORATION
 	server.xdg_decoration_mgr = wlr_xdg_decoration_manager_v1_create(server.wl_display);
 	if (server.xdg_decoration_mgr) {
 		server.new_xdg_decoration.notify = server_new_xdg_decoration;
@@ -3158,19 +3390,24 @@ int main(int argc, char *argv[]) {
 		wlr_server_decoration_manager_set_default_mode(server.server_decoration_mgr,
 			WLR_SERVER_DECORATION_MANAGER_MODE_SERVER);
 	}
+#endif
 
+#if CONFIG_LAYER_SHELL
 	server.layer_shell = wlr_layer_shell_v1_create(server.wl_display, 4);
 	if (server.layer_shell) {
 		server.new_layer_shell_surface.notify = server_new_layer_shell_surface;
 		wl_signal_add(&server.layer_shell->events.new_surface, &server.new_layer_shell_surface);
 	}
+#endif
 
+#if CONFIG_SESSION_LOCK
 	wl_list_init(&server.lock_surfaces);
 	server.session_lock_mgr = wlr_session_lock_manager_v1_create(server.wl_display);
 	if (server.session_lock_mgr) {
 		server.new_session_lock.notify = server_new_session_lock;
 		wl_signal_add(&server.session_lock_mgr->events.new_lock, &server.new_session_lock);
 	}
+#endif
 
 	server.cursor = wlr_cursor_create();
 	wlr_cursor_attach_output_layout(server.cursor, server.output_layout);
@@ -3193,9 +3430,11 @@ int main(int argc, char *argv[]) {
 	server.new_input.notify = server_new_input;
 	wl_signal_add(&server.backend->events.new_input, &server.new_input);
 	server.seat = wlr_seat_create(server.wl_display, "seat0");
+#if CONFIG_XWAYLAND
 	if (server.xwayland) {
 		wlr_xwayland_set_seat(server.xwayland, server.seat);
 	}
+#endif
 	server.request_cursor.notify = seat_request_cursor;
 	wl_signal_add(&server.seat->events.request_set_cursor,
 			&server.request_cursor);
@@ -3205,9 +3444,11 @@ int main(int argc, char *argv[]) {
 	server.request_set_selection.notify = seat_request_set_selection;
 	wl_signal_add(&server.seat->events.request_set_selection,
 			&server.request_set_selection);
+#if CONFIG_PRIMARY_SELECTION
 	server.request_set_primary_selection.notify = seat_request_set_primary_selection;
 	wl_signal_add(&server.seat->events.request_set_primary_selection,
 			&server.request_set_primary_selection);
+#endif
 
 	const char *socket = wl_display_add_socket_auto(server.wl_display);
 	if (!socket) {
@@ -3240,26 +3481,34 @@ int main(int argc, char *argv[]) {
 
 	ipc_finish(&server);
 
+#if CONFIG_XWAYLAND
 	if (server.xwayland) {
 		wl_list_remove(&server.xwayland_ready.link);
 		wl_list_remove(&server.new_xwayland_surface.link);
 		wlr_xwayland_destroy(server.xwayland);
 		server.xwayland = NULL;
 	}
+#endif
 
 	wl_display_destroy_clients(server.wl_display);
 
 	wl_list_remove(&server.new_xdg_toplevel.link);
 	wl_list_remove(&server.new_xdg_popup.link);
+#if CONFIG_XDG_DECORATION
 	if (server.xdg_decoration_mgr) {
 		wl_list_remove(&server.new_xdg_decoration.link);
 	}
+#endif
+#if CONFIG_LAYER_SHELL
 	if (server.layer_shell) {
 		wl_list_remove(&server.new_layer_shell_surface.link);
 	}
+#endif
+#if CONFIG_SESSION_LOCK
 	if (server.session_lock_mgr) {
 		wl_list_remove(&server.new_session_lock.link);
 	}
+#endif
 
 	wl_list_remove(&server.cursor_motion.link);
 	wl_list_remove(&server.cursor_motion_absolute.link);
@@ -3271,7 +3520,9 @@ int main(int argc, char *argv[]) {
 	wl_list_remove(&server.request_cursor.link);
 	wl_list_remove(&server.pointer_focus_change.link);
 	wl_list_remove(&server.request_set_selection.link);
+#if CONFIG_PRIMARY_SELECTION
 	wl_list_remove(&server.request_set_primary_selection.link);
+#endif
 
 	wl_list_remove(&server.new_output.link);
 

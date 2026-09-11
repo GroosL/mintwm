@@ -15,6 +15,10 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 
+#ifndef CONFIG_GAPS
+#define CONFIG_GAPS 1
+#endif
+
 static pthread_mutex_t ctl_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char last_ctl_reply[1024] = "OK MinTwm FUSE ready\n";
 
@@ -136,6 +140,10 @@ static const struct vfile_entry vfiles[] = {
 	{ "/focus",               0222, VFILE_REG, "/",              "focus",     NULL,               "focus %s\n" },
 	{ "/swallow",             0666, VFILE_REG, "/",              "swallow",   "get_swallow\n",    "toggle_swallow\n" },
 	{ "/auto_swallow",        0666, VFILE_REG, "/",              "auto_swallow", "auto_swallow\n", "auto_swallow %s\n" },
+#if CONFIG_GAPS
+	{ "/gaps",                0666, VFILE_REG, "/",              "gaps",         "get_gaps\n",       "gaps %s\n" },
+	{ "/smart_gaps",          0666, VFILE_REG, "/",              "smart_gaps",   "get_smart_gaps\n", "smart_gaps %s\n" },
+#endif
 
 	/* /windows/active files */
 	{ "/windows/active/title",     0444, VFILE_REG, "/windows/active", "title",     "get_title\n",      NULL },
@@ -331,6 +339,10 @@ static void print_usage(const char *prog) {
 	printf("  focus                    Write next, prev, or master\n");
 	printf("  swallow                  Read swallowing state (0 or 1) / write to toggle\n");
 	printf("  auto_swallow             Read (0 or 1) / write (on/off/toggle) auto-swallowing\n");
+#if CONFIG_GAPS
+	printf("  gaps                     Read gap size / write (0-100, +/-N, on/off/toggle) gaps\n");
+	printf("  smart_gaps               Read (0 or 1) / write (on/off/toggle) smart gaps\n");
+#endif
 	printf("  windows/active/title     Read active window title\n");
 	printf("  windows/active/ctl       Write close, fullscreen, swap, or toggle_swallow\n");
 	printf("  windows/active/workspace Write workspace number to move active window\n");

@@ -21,6 +21,9 @@ static void print_usage(const char *prog) {
 	fprintf(stderr, "  get_swallow               Print swallowing state (0 or 1)\n");
 	fprintf(stderr, "  toggle_auto_swallow       Toggle auto-swallow on/off\n");
 	fprintf(stderr, "  auto_swallow <on|off|toggle> Control auto-swallow\n");
+	fprintf(stderr, "  toggle_gaps               Toggle window gaps on/off\n");
+	fprintf(stderr, "  gaps <0-100|+N|-N|on|off> Control gap size or state\n");
+	fprintf(stderr, "  smart_gaps <on|off|toggle> Control smart gaps (no gap for 1 window)\n");
 	fprintf(stderr, "  mfact <0.1-0.9|+/-0.05>   Change master area factor\n");
 	fprintf(stderr, "  get_workspace             Print active workspace number\n");
 	fprintf(stderr, "  get_workspaces            Print workspace list with [active]\n");

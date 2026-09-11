@@ -40,6 +40,9 @@ PRIMARY_SELECTION ?= 1
 # Window swallowing (dwm-style swallowing: hide terminal when child GUI app opens)
 SWALLOWING ?= 1
 
+# Window gaps and smart gaps support
+GAPS ?= 1
+
 # ==============================================================================
 # Utilities to Build & Install (1 = enable, 0 = disable)
 # ==============================================================================

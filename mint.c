@@ -110,6 +110,10 @@
 
 #define NUM_WORKSPACES 9
 #define DEFAULT_MFACT 0.55
+#if CONFIG_GAPS
+#define DEFAULT_GAPS 10
+#define DEFAULT_SMART_GAPS true
+#endif
 
 struct mint_server {
 	struct wl_display *wl_display;
@@ -174,6 +178,11 @@ struct mint_server {
 	unsigned int prev_workspace;
 	struct mint_toplevel *last_focused_per_workspace[NUM_WORKSPACES];
 	double mfact;
+#if CONFIG_GAPS
+	int gaps;
+	bool gaps_enabled;
+	bool smart_gaps;
+#endif
 #if CONFIG_SWALLOWING
 	bool auto_swallow;
 #endif
@@ -294,6 +303,15 @@ struct mint_toplevel {
 	struct wl_listener set_geometry;
 #endif
 };
+
+static inline bool toplevel_is_unmanaged(const struct mint_toplevel *tl) {
+#if CONFIG_XWAYLAND
+	if (!tl) return false;
+	if (tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) return true;
+	if (tl->type == MINT_TOPLEVEL_XWAYLAND && tl->xwayland_surface && tl->xwayland_surface->override_redirect) return true;
+#endif
+	return false;
+}
 
 #if CONFIG_LAYER_SHELL
 struct mint_layer_surface {
@@ -578,13 +596,15 @@ static void toplevel_set_size_and_position(struct mint_toplevel *tl, int x, int 
 static void toplevel_set_activated(struct mint_toplevel *tl, bool activated) {
 	if (!tl) return;
 #if CONFIG_XWAYLAND
-	if (tl->type == MINT_TOPLEVEL_XWAYLAND || tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) {
-		if (tl->xwayland_surface) {
+	if (tl->type == MINT_TOPLEVEL_XWAYLAND) {
+		if (tl->xwayland_surface && !tl->xwayland_surface->override_redirect) {
 			wlr_xwayland_surface_activate(tl->xwayland_surface, activated);
 			if (activated) {
 				wlr_xwayland_surface_restack(tl->xwayland_surface, NULL, XCB_STACK_MODE_ABOVE);
 			}
 		}
+	} else if (tl->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) {
+		/* Unmanaged / override-redirect surfaces manage their own activation and stacking */
 	} else
 #endif
 	{
@@ -675,28 +695,85 @@ static void arrange_windows(struct mint_server *server) {
 		return;
 	}
 
+#if CONFIG_GAPS
+	/* Determine effective gap size */
+	int g = (server->gaps_enabled && server->gaps > 0) ? server->gaps : 0;
+	if (g > 0 && server->smart_gaps && count == 1) {
+		g = 0;
+	}
+
+	/* Safety check: ensure gaps don't consume more than available space */
+	if (g > 0) {
+		if (area.width < 2 * g + 120 || area.height < 2 * g + 120) {
+			g = 0;
+		}
+	}
+
+	if (count == 1) {
+		if (g > 0) {
+			toplevel_set_size_and_position(tiled[0],
+				area.x + g, area.y + g,
+				area.width - 2 * g, area.height - 2 * g);
+		} else {
+			toplevel_set_size_and_position(tiled[0], area.x, area.y, area.width, area.height);
+		}
+		return;
+	}
+#else
+	int g = 0;
 	if (count == 1) {
 		toplevel_set_size_and_position(tiled[0], area.x, area.y, area.width, area.height);
 		return;
 	}
+#endif
 
-	/* DWM Master-and-Stack Tiling */
-	int mw = (int)(area.width * server->mfact);
-	if (mw < 60) mw = 60;
-	if (mw > area.width - 60) mw = area.width - 60;
+	/* DWM Master-and-Stack Tiling with Gaps */
+	if (g == 0) {
+		int mw = (int)(area.width * server->mfact);
+		if (mw < 60) mw = 60;
+		if (mw > area.width - 60) mw = area.width - 60;
 
-	int sw = area.width - mw;
-	int sx = area.x + mw;
-	int num_stack = count - 1;
+		int sw = area.width - mw;
+		int sx = area.x + mw;
+		int num_stack = count - 1;
 
-	toplevel_set_size_and_position(tiled[0], area.x, area.y, mw, area.height);
-	for (int i = 1; i < count; i++) {
-		int sh = area.height / num_stack;
-		int si = i - 1;
-		int sy = area.y + si * sh;
-		int h = (si == num_stack - 1) ? (area.height - si * sh) : sh;
+		toplevel_set_size_and_position(tiled[0], area.x, area.y, mw, area.height);
+		for (int i = 1; i < count; i++) {
+			int sh = area.height / num_stack;
+			int si = i - 1;
+			int sy = area.y + si * sh;
+			int h = (si == num_stack - 1) ? (area.height - si * sh) : sh;
 
-		toplevel_set_size_and_position(tiled[i], sx, sy, sw, h);
+			toplevel_set_size_and_position(tiled[i], sx, sy, sw, h);
+		}
+	} else {
+		int x0 = area.x + g;
+		int y0 = area.y + g;
+		int inner_w = area.width - 2 * g;
+		int inner_h = area.height - 2 * g;
+
+		int avail_w = inner_w - g;
+		int mw = (int)(avail_w * server->mfact);
+		if (mw < 60) mw = 60;
+		if (mw > avail_w - 60) mw = avail_w - 60;
+
+		int sw = avail_w - mw;
+		int sx = x0 + mw + g;
+		int num_stack = count - 1;
+
+		toplevel_set_size_and_position(tiled[0], x0, y0, mw, inner_h);
+
+		int avail_sh = inner_h - (num_stack - 1) * g;
+		int base_sh = (avail_sh > 0) ? (avail_sh / num_stack) : 20;
+
+		for (int i = 1; i < count; i++) {
+			int si = i - 1;
+			int sy = y0 + si * (base_sh + g);
+			int h = (si == num_stack - 1) ? (y0 + inner_h - sy) : base_sh;
+			if (h < 20) h = 20;
+
+			toplevel_set_size_and_position(tiled[i], sx, sy, sw, h);
+		}
 	}
 }
 
@@ -739,6 +816,11 @@ static void focus_toplevel(struct mint_server *server, struct mint_toplevel *top
 	if (server->locked) {
 		return;
 	}
+#if CONFIG_XWAYLAND
+	if (toplevel && toplevel_is_unmanaged(toplevel)) {
+		return;
+	}
+#endif
 #if CONFIG_SWALLOWING
 	if (toplevel && toplevel->swallowed_by != NULL) {
 		toplevel = toplevel->swallowed_by;
@@ -1476,7 +1558,22 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 				}
 			}
 		} else if (toplevel != NULL) {
-			focus_toplevel(server, toplevel);
+#if CONFIG_XWAYLAND
+			if (toplevel_is_unmanaged(toplevel)) {
+				if (toplevel->xwayland_surface &&
+				    wlr_xwayland_surface_override_redirect_wants_focus(toplevel->xwayland_surface) &&
+				    wlr_xwayland_surface_icccm_input_model(toplevel->xwayland_surface) != WLR_ICCCM_INPUT_MODEL_NONE) {
+					struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(server->seat);
+					if (surface && keyboard) {
+						wlr_seat_keyboard_notify_enter(server->seat, surface,
+							keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
+					}
+				}
+			} else
+#endif
+			{
+				focus_toplevel(server, toplevel);
+			}
 		}
 	}
 }
@@ -2002,12 +2099,24 @@ static void xwayland_surface_map(struct wl_listener *listener, void *data) {
 
 	toplevel->mapped = true;
 
+	if (xsurface && xsurface->override_redirect) {
+		toplevel->type = MINT_TOPLEVEL_XWAYLAND_UNMANAGED;
+	}
+
 	if (toplevel->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) {
 		toplevel->scene_tree = wlr_scene_subsurface_tree_create(
 			server->scene_tree_top, xsurface->surface);
 		if (toplevel->scene_tree) {
 			toplevel->scene_tree->node.data = toplevel;
 			wlr_scene_node_set_position(&toplevel->scene_tree->node, xsurface->x, xsurface->y);
+		}
+		if (wlr_xwayland_surface_override_redirect_wants_focus(xsurface) &&
+		    wlr_xwayland_surface_icccm_input_model(xsurface) != WLR_ICCCM_INPUT_MODEL_NONE) {
+			struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(server->seat);
+			if (xsurface->surface && keyboard) {
+				wlr_seat_keyboard_notify_enter(server->seat, xsurface->surface,
+					keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
+			}
 		}
 		return;
 	}
@@ -2045,6 +2154,7 @@ static void xwayland_surface_map(struct wl_listener *listener, void *data) {
 static void xwayland_surface_unmap(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
 	struct mint_server *server = toplevel->server;
+	struct wlr_xwayland_surface *xsurface = toplevel->xwayland_surface;
 
 	toplevel->mapped = false;
 
@@ -2052,10 +2162,30 @@ static void xwayland_surface_unmap(struct wl_listener *listener, void *data) {
 		toplevel_set_fullscreen(toplevel, false);
 	}
 
-	if (toplevel->type == MINT_TOPLEVEL_XWAYLAND_UNMANAGED) {
+	if (toplevel_is_unmanaged(toplevel)) {
 		if (toplevel->scene_tree) {
 			wlr_scene_node_destroy(&toplevel->scene_tree->node);
 			toplevel->scene_tree = NULL;
+		}
+		if (!wl_list_empty(&toplevel->link)) {
+			wl_list_remove(&toplevel->link);
+			wl_list_init(&toplevel->link);
+		}
+		for (int i = 0; i < NUM_WORKSPACES; i++) {
+			if (server->last_focused_per_workspace[i] == toplevel) {
+				server->last_focused_per_workspace[i] = NULL;
+			}
+		}
+		if (server->focused_toplevel == toplevel) {
+			server->focused_toplevel = NULL;
+		}
+		if (xsurface && xsurface->surface &&
+		    server->seat->keyboard_state.focused_surface == xsurface->surface) {
+			if (server->focused_toplevel) {
+				focus_toplevel(server, server->focused_toplevel);
+			} else {
+				wlr_seat_keyboard_notify_clear_focus(server->seat);
+			}
 		}
 		return;
 	}
@@ -2127,6 +2257,10 @@ static void xwayland_surface_associate(struct wl_listener *listener, void *data)
 static void xwayland_surface_dissociate(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, dissociate);
 
+	if (toplevel->mapped) {
+		xwayland_surface_unmap(&toplevel->unmap, NULL);
+	}
+
 	if (!wl_list_empty(&toplevel->map.link)) {
 		wl_list_remove(&toplevel->map.link);
 		wl_list_init(&toplevel->map.link);
@@ -2161,7 +2295,7 @@ static void xwayland_surface_request_configure(struct wl_listener *listener, voi
 
 static void xwayland_surface_request_activate(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, request_activate);
-	if (toplevel->type == MINT_TOPLEVEL_XWAYLAND) {
+	if (toplevel->type == MINT_TOPLEVEL_XWAYLAND && !toplevel_is_unmanaged(toplevel)) {
 		if (toplevel->workspace == toplevel->server->current_workspace && toplevel_is_mapped(toplevel)) {
 			focus_toplevel(toplevel->server, toplevel);
 		}
@@ -2182,10 +2316,68 @@ static void xwayland_surface_request_fullscreen(struct wl_listener *listener, vo
 
 static void xwayland_surface_set_override_redirect(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, set_override_redirect);
-	if (toplevel->xwayland_surface->override_redirect) {
-		toplevel->type = MINT_TOPLEVEL_XWAYLAND_UNMANAGED;
+	struct mint_server *server = toplevel->server;
+	struct wlr_xwayland_surface *xsurface = toplevel->xwayland_surface;
+	bool new_override_redirect = xsurface ? xsurface->override_redirect : false;
+	enum mint_toplevel_type new_type = new_override_redirect ?
+		MINT_TOPLEVEL_XWAYLAND_UNMANAGED : MINT_TOPLEVEL_XWAYLAND;
+
+	if (toplevel->type == new_type) {
+		return;
+	}
+
+	toplevel->type = new_type;
+
+	if (!toplevel->mapped) {
+		return;
+	}
+
+	if (new_override_redirect) {
+		/* Transition from managed to unmanaged */
+		if (!wl_list_empty(&toplevel->link)) {
+			wl_list_remove(&toplevel->link);
+			wl_list_init(&toplevel->link);
+		}
+		for (int i = 0; i < NUM_WORKSPACES; i++) {
+			if (server->last_focused_per_workspace[i] == toplevel) {
+				server->last_focused_per_workspace[i] = NULL;
+			}
+		}
+		if (toplevel->scene_tree) {
+			wlr_scene_node_reparent(&toplevel->scene_tree->node, server->scene_tree_top);
+			if (xsurface) {
+				wlr_scene_node_set_position(&toplevel->scene_tree->node, xsurface->x, xsurface->y);
+			}
+		}
+		if (server->focused_toplevel == toplevel) {
+			server->focused_toplevel = NULL;
+			struct mint_toplevel *next_focus = NULL;
+			struct mint_toplevel *tl;
+			wl_list_for_each(tl, &server->toplevels, link) {
+				if (toplevel_is_mapped(tl) && tl->workspace == server->current_workspace) {
+					next_focus = tl;
+					break;
+				}
+			}
+			focus_toplevel(server, next_focus);
+		}
+		arrange_windows(server);
 	} else {
-		toplevel->type = MINT_TOPLEVEL_XWAYLAND;
+		/* Transition from unmanaged to managed */
+		if (toplevel->scene_tree) {
+			wlr_scene_node_reparent(&toplevel->scene_tree->node, server->scene_tree_windows);
+		}
+		if (wl_list_empty(&toplevel->link)) {
+			wl_list_insert(&server->toplevels, &toplevel->link);
+		}
+		bool visible = (toplevel->workspace == server->current_workspace);
+		if (toplevel->scene_tree) {
+			wlr_scene_node_set_enabled(&toplevel->scene_tree->node, visible);
+		}
+		arrange_windows(server);
+		if (visible) {
+			focus_toplevel(server, toplevel);
+		}
 	}
 }
 
@@ -2200,6 +2392,10 @@ static void xwayland_surface_set_geometry(struct wl_listener *listener, void *da
 static void xwayland_surface_destroy(struct wl_listener *listener, void *data) {
 	struct mint_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 	struct mint_server *server = toplevel->server;
+
+	if (toplevel->mapped) {
+		xwayland_surface_unmap(&toplevel->unmap, NULL);
+	}
 
 #if CONFIG_SWALLOWING
 	if (toplevel->swallowing) {
@@ -2270,6 +2466,10 @@ static void xwayland_surface_destroy(struct wl_listener *listener, void *data) {
 	if (toplevel->scene_tree) {
 		wlr_scene_node_destroy(&toplevel->scene_tree->node);
 		toplevel->scene_tree = NULL;
+	}
+
+	if (toplevel->xwayland_surface) {
+		toplevel->xwayland_surface->data = NULL;
 	}
 
 	free(toplevel);
@@ -2789,6 +2989,94 @@ static void ipc_execute_command(struct mint_server *server,
 		return;
 	}
 
+#if CONFIG_GAPS
+	if (strcmp(cmd, "toggle_gaps") == 0) {
+		server->gaps_enabled = !server->gaps_enabled;
+		arrange_windows(server);
+		ipc_reply(resp, resp_size, "OK gaps %s\n", server->gaps_enabled ? "on" : "off");
+		return;
+	}
+
+	if (strncmp(cmd, "gaps", 4) == 0) {
+		const char *arg = cmd + 4;
+		while (*arg == ' ') arg++;
+		if (*arg == '\0') {
+			ipc_reply(resp, resp_size, "%d\n", server->gaps_enabled ? server->gaps : 0);
+		} else if (strcmp(arg, "toggle") == 0) {
+			server->gaps_enabled = !server->gaps_enabled;
+			arrange_windows(server);
+			ipc_reply(resp, resp_size, "OK gaps %s\n", server->gaps_enabled ? "on" : "off");
+		} else if (strcmp(arg, "on") == 0 || strcmp(arg, "1") == 0 || strcmp(arg, "true") == 0) {
+			server->gaps_enabled = true;
+			arrange_windows(server);
+			ipc_reply(resp, resp_size, "OK gaps on\n");
+		} else if (strcmp(arg, "off") == 0 || strcmp(arg, "0") == 0 || strcmp(arg, "false") == 0) {
+			server->gaps_enabled = false;
+			arrange_windows(server);
+			ipc_reply(resp, resp_size, "OK gaps off\n");
+		} else if (*arg == '+' || *arg == '-') {
+			int delta = atoi(arg);
+			server->gaps += delta;
+			if (server->gaps < 0) server->gaps = 0;
+			if (server->gaps > 100) server->gaps = 100;
+			server->gaps_enabled = (server->gaps > 0);
+			arrange_windows(server);
+			ipc_reply(resp, resp_size, "OK gaps %d\n", server->gaps);
+		} else {
+			int val = atoi(arg);
+			if (val >= 0 && val <= 100) {
+				server->gaps = val;
+				server->gaps_enabled = (val > 0);
+				arrange_windows(server);
+				ipc_reply(resp, resp_size, "OK gaps %d\n", server->gaps);
+			} else {
+				ipc_reply(resp, resp_size, "ERROR invalid gaps value (0-100, +/-N, on/off/toggle)\n");
+			}
+		}
+		return;
+	}
+
+	if (strcmp(cmd, "get_gaps") == 0) {
+		ipc_reply(resp, resp_size, "%d\n", server->gaps_enabled ? server->gaps : 0);
+		return;
+	}
+
+	if (strcmp(cmd, "toggle_smart_gaps") == 0) {
+		server->smart_gaps = !server->smart_gaps;
+		arrange_windows(server);
+		ipc_reply(resp, resp_size, "OK smart_gaps %s\n", server->smart_gaps ? "on" : "off");
+		return;
+	}
+
+	if (strncmp(cmd, "smart_gaps", 10) == 0) {
+		const char *arg = cmd + 10;
+		while (*arg == ' ') arg++;
+		if (*arg == '\0') {
+			ipc_reply(resp, resp_size, "%d\n", server->smart_gaps ? 1 : 0);
+		} else if (strcmp(arg, "toggle") == 0) {
+			server->smart_gaps = !server->smart_gaps;
+			arrange_windows(server);
+			ipc_reply(resp, resp_size, "OK smart_gaps %s\n", server->smart_gaps ? "on" : "off");
+		} else if (strcmp(arg, "on") == 0 || strcmp(arg, "1") == 0 || strcmp(arg, "true") == 0) {
+			server->smart_gaps = true;
+			arrange_windows(server);
+			ipc_reply(resp, resp_size, "OK smart_gaps on\n");
+		} else if (strcmp(arg, "off") == 0 || strcmp(arg, "0") == 0 || strcmp(arg, "false") == 0) {
+			server->smart_gaps = false;
+			arrange_windows(server);
+			ipc_reply(resp, resp_size, "OK smart_gaps off\n");
+		} else {
+			ipc_reply(resp, resp_size, "ERROR expected on/off/toggle\n");
+		}
+		return;
+	}
+
+	if (strcmp(cmd, "get_smart_gaps") == 0) {
+		ipc_reply(resp, resp_size, "%d\n", server->smart_gaps ? 1 : 0);
+		return;
+	}
+#endif
+
 	if (strcmp(cmd, "get_workspace") == 0) {
 		ipc_reply(resp, resp_size, "%u\n", server->current_workspace);
 		return;
@@ -2837,9 +3125,19 @@ static void ipc_execute_command(struct mint_server *server,
 		bool is_swallowing = false;
 		bool auto_swallow_val = false;
 #endif
-		ipc_reply(resp, resp_size, "{\"workspace\":%u,\"windows\":%d,\"title\":\"%s\",\"locked\":%s,\"swallowing\":%s,\"auto_swallow\":%s}\n",
+#if CONFIG_GAPS
+		int gaps_val = server->gaps;
+		bool gaps_enabled_val = server->gaps_enabled;
+		bool smart_gaps_val = server->smart_gaps;
+#else
+		int gaps_val = 0;
+		bool gaps_enabled_val = false;
+		bool smart_gaps_val = false;
+#endif
+		ipc_reply(resp, resp_size, "{\"workspace\":%u,\"windows\":%d,\"title\":\"%s\",\"locked\":%s,\"swallowing\":%s,\"auto_swallow\":%s,\"gaps\":%d,\"gaps_enabled\":%s,\"smart_gaps\":%s}\n",
 			server->current_workspace, count, escaped_title, server->locked ? "true" : "false",
-			is_swallowing ? "true" : "false", auto_swallow_val ? "true" : "false");
+			is_swallowing ? "true" : "false", auto_swallow_val ? "true" : "false",
+			gaps_val, gaps_enabled_val ? "true" : "false", smart_gaps_val ? "true" : "false");
 		return;
 	}
 
@@ -2864,6 +3162,14 @@ static void ipc_execute_command(struct mint_server *server,
 			"  get_swallow               Get swallowing state (0 or 1)\n"
 			"  toggle_auto_swallow       Toggle auto-swallow on/off\n"
 			"  auto_swallow <on|off|toggle> Control auto-swallow\n"
+#if CONFIG_GAPS
+			"  toggle_gaps               Toggle gaps on/off\n"
+			"  gaps <0-100|+N|-N|on|off> Control gap size or state\n"
+			"  get_gaps                  Get current gap size\n"
+			"  toggle_smart_gaps         Toggle smart gaps on/off\n"
+			"  smart_gaps <on|off|toggle> Control smart gaps\n"
+			"  get_smart_gaps            Get smart gaps state (0 or 1)\n"
+#endif
 			"  mfact <factor>            Change master factor (0.1 - 0.9)\n"
 			"  get_workspace             Get current workspace number\n"
 			"  get_workspaces            Get workspace list with [active]\n"
@@ -3353,6 +3659,11 @@ int main(int argc, char *argv[]) {
 	server.current_workspace = 1;
 	server.prev_workspace = 1;
 	server.mfact = DEFAULT_MFACT;
+#if CONFIG_GAPS
+	server.gaps = DEFAULT_GAPS;
+	server.gaps_enabled = true;
+	server.smart_gaps = DEFAULT_SMART_GAPS;
+#endif
 #if CONFIG_SWALLOWING
 	server.auto_swallow = true;
 #endif

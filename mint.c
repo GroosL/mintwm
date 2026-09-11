@@ -35,6 +35,7 @@
 #include <assert.h>
 #include <getopt.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -1140,7 +1141,7 @@ static void change_workspace(struct mint_server *server, unsigned int ws) {
 
 	struct mint_toplevel *tl;
 	wl_list_for_each(tl, &server->toplevels, link) {
-		bool visible = (tl->workspace == ws);
+		bool visible = (tl->workspace == ws && toplevel_is_mapped(tl));
 		if (tl->scene_tree) {
 			wlr_scene_node_set_enabled(&tl->scene_tree->node, visible);
 		}
@@ -1206,19 +1207,31 @@ static void keyboard_handle_modifiers(struct wl_listener *listener, void *data) 
 static ssize_t read_reply_line(int fd, char *buf, size_t max, int timeout_ms) {
 	if (max == 0) return -1;
 	struct pollfd pfd = { .fd = fd, .events = POLLIN };
-	if (poll(&pfd, 1, timeout_ms) <= 0) {
-		return -1;
+	int remaining = timeout_ms;
+	while (remaining >= 0) {
+		if (poll(&pfd, 1, remaining > 0 ? remaining : 0) <= 0) {
+			return -1;
+		}
+		ssize_t n = recv(fd, buf, max - 1, MSG_PEEK);
+		if (n <= 0) return -1;
+		char *nl = memchr(buf, '\n', n);
+		if (nl != NULL) {
+			size_t to_read = (size_t)(nl - buf + 1);
+			ssize_t r = read(fd, buf, to_read);
+			if (r <= 0) return -1;
+			buf[r] = '\0';
+			char *end = memchr(buf, '\n', r);
+			if (end) *end = '\0';
+			return (ssize_t)strlen(buf);
+		}
+		if ((size_t)n >= max - 1) {
+			ssize_t discarded = read(fd, buf, max - 1);
+			(void)discarded;
+			return -1;
+		}
+		remaining -= 2;
 	}
-	ssize_t n = recv(fd, buf, max - 1, MSG_PEEK);
-	if (n <= 0) return -1;
-	char *nl = memchr(buf, '\n', n);
-	size_t to_read = nl ? (size_t)(nl - buf + 1) : (size_t)n;
-	n = read(fd, buf, to_read);
-	if (n <= 0) return -1;
-	buf[n] = '\0';
-	nl = memchr(buf, '\n', n);
-	if (nl) *nl = '\0';
-	return (ssize_t)strlen(buf);
+	return -1;
 }
 
 static void keyboard_handle_key(struct wl_listener *listener, void *data) {
@@ -1552,6 +1565,10 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	wlr_output_state_finish(&state);
 
 	struct mint_output *output = calloc(1, sizeof(*output));
+	if (!output) {
+		wlr_log(WLR_ERROR, "failed to allocate mint_output");
+		return;
+	}
 	output->wlr_output = wlr_output;
 	wlr_output->data = output;
 	output->server = server;
@@ -1822,7 +1839,7 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 		return;
 	}
 
-	if (toplevel->xdg_toplevel->base->surface->mapped) {
+	if (toplevel->scene_tree && toplevel->xdg_toplevel->base->surface->mapped) {
 		wlr_scene_node_set_position(&toplevel->scene_tree->node,
 			toplevel->pending_x - toplevel->xdg_toplevel->base->geometry.x,
 			toplevel->pending_y - toplevel->xdg_toplevel->base->geometry.y);
@@ -2448,12 +2465,76 @@ static void ipc_client_destroy(struct mint_ipc_client *client) {
 	free(client);
 }
 
+static void ipc_reply(char *resp, size_t resp_size, const char *fmt, ...) {
+	if (!resp || resp_size == 0) {
+		return;
+	}
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(resp, resp_size, fmt, args);
+	va_end(args);
+}
+
+static void sanitize_title_for_state(const char *src, char *dst, size_t dst_size) {
+	if (!dst || dst_size == 0) return;
+	if (!src) {
+		dst[0] = '\0';
+		return;
+	}
+	size_t o = 0;
+	for (size_t i = 0; src[i] != '\0' && o + 1 < dst_size; i++) {
+		char c = src[i];
+		if (c == '\n' || c == '\r') {
+			dst[o++] = ' ';
+		} else {
+			dst[o++] = c;
+		}
+	}
+	dst[o] = '\0';
+}
+
+static void json_escape_string(const char *src, char *dst, size_t dst_size) {
+	if (!dst || dst_size == 0) return;
+	if (!src) {
+		dst[0] = '\0';
+		return;
+	}
+	size_t o = 0;
+	for (size_t i = 0; src[i] != '\0' && o + 1 < dst_size; i++) {
+		unsigned char c = (unsigned char)src[i];
+		if (c == '"' || c == '\\') {
+			if (o + 2 >= dst_size) break;
+			dst[o++] = '\\';
+			dst[o++] = (char)c;
+		} else if (c == '\n') {
+			if (o + 2 >= dst_size) break;
+			dst[o++] = '\\';
+			dst[o++] = 'n';
+		} else if (c == '\r') {
+			if (o + 2 >= dst_size) break;
+			dst[o++] = '\\';
+			dst[o++] = 'r';
+		} else if (c == '\t') {
+			if (o + 2 >= dst_size) break;
+			dst[o++] = '\\';
+			dst[o++] = 't';
+		} else if (c < 32) {
+			continue;
+		} else {
+			dst[o++] = (char)c;
+		}
+	}
+	dst[o] = '\0';
+}
+
 static void ipc_push_state(struct mint_server *server, struct mint_ipc_client *client) {
-	const char *title = server->focused_toplevel ?
+	const char *raw_title = server->focused_toplevel ?
 		toplevel_get_title(server->focused_toplevel) : "";
+	char title[256];
+	sanitize_title_for_state(raw_title, title, sizeof(title));
 	char msg[512];
 	int len = snprintf(msg, sizeof(msg), "STATE %u %s\n",
-		server->current_workspace, title ? title : "");
+		server->current_workspace, title);
 	ssize_t w = write(client->fd, msg, len);
 	if (w <= 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
 		ipc_client_destroy(client);
@@ -2461,11 +2542,13 @@ static void ipc_push_state(struct mint_server *server, struct mint_ipc_client *c
 }
 
 static void ipc_broadcast_state(struct mint_server *server) {
-	const char *title = server->focused_toplevel ?
+	const char *raw_title = server->focused_toplevel ?
 		toplevel_get_title(server->focused_toplevel) : "";
+	char title[256];
+	sanitize_title_for_state(raw_title, title, sizeof(title));
 	char msg[512];
 	int len = snprintf(msg, sizeof(msg), "STATE %u %s\n",
-		server->current_workspace, title ? title : "");
+		server->current_workspace, title);
 
 	struct mint_ipc_client *client, *tmp;
 	wl_list_for_each_safe(client, tmp, &server->ipc_clients, link) {
@@ -2484,16 +2567,14 @@ static void ipc_execute_command(struct mint_server *server,
 	while (*cmd == ' ' || *cmd == '\t') cmd++;
 
 	if (*cmd == '\0') {
-		if (resp && resp_size > 0) snprintf(resp, resp_size, "ERROR empty command\n");
+		ipc_reply(resp, resp_size, "ERROR empty command\n");
 		return;
 	}
 
 	if (server->locked) {
 		if (strcmp(cmd, "status") != 0 && strcmp(cmd, "get_workspace") != 0 &&
 				strcmp(cmd, "get_workspaces") != 0 && strcmp(cmd, "subscribe") != 0) {
-			if (resp && resp_size > 0) {
-				snprintf(resp, resp_size, "ERROR compositor is locked\n");
-			}
+			ipc_reply(resp, resp_size, "ERROR compositor is locked\n");
 			return;
 		}
 	}
@@ -2504,9 +2585,7 @@ static void ipc_execute_command(struct mint_server *server,
 			wl_event_source_remove(client->event_source);
 			client->event_source = NULL;
 		}
-		if (resp && resp_size > 0) {
-			snprintf(resp, resp_size, "OK key grab active\n");
-		}
+		ipc_reply(resp, resp_size, "OK key grab active\n");
 		return;
 	}
 
@@ -2514,9 +2593,7 @@ static void ipc_execute_command(struct mint_server *server,
 		if (server->key_grabber == client) {
 			server->key_grabber = NULL;
 		}
-		if (resp && resp_size > 0) {
-			snprintf(resp, resp_size, "OK key grab released\n");
-		}
+		ipc_reply(resp, resp_size, "OK key grab released\n");
 		return;
 	}
 
@@ -2534,14 +2611,17 @@ static void ipc_execute_command(struct mint_server *server,
 		while (*sh_cmd == ' ') sh_cmd++;
 		if (*sh_cmd != '\0') {
 			pid_t pid = fork();
-			if (pid == 0) {
+			if (pid < 0) {
+				ipc_reply(resp, resp_size, "ERROR fork failed\n");
+			} else if (pid == 0) {
 				setsid();
 				execl("/bin/sh", "/bin/sh", "-c", sh_cmd, (char *)NULL);
 				_exit(1);
+			} else {
+				ipc_reply(resp, resp_size, "OK launched '%s'\n", sh_cmd);
 			}
-			snprintf(resp, resp_size, "OK launched '%s'\n", sh_cmd);
 		} else {
-			snprintf(resp, resp_size, "ERROR empty command\n");
+			ipc_reply(resp, resp_size, "ERROR empty command\n");
 		}
 		return;
 	}
@@ -2554,24 +2634,24 @@ static void ipc_execute_command(struct mint_server *server,
 		if (strcmp(arg, "next") == 0) {
 			unsigned int next_ws = (server->current_workspace % NUM_WORKSPACES) + 1;
 			change_workspace(server, next_ws);
-			snprintf(resp, resp_size, "OK workspace %u\n", next_ws);
+			ipc_reply(resp, resp_size, "OK workspace %u\n", next_ws);
 		} else if (strcmp(arg, "prev") == 0) {
 			unsigned int prev_ws = (server->current_workspace == 1) ? NUM_WORKSPACES : server->current_workspace - 1;
 			change_workspace(server, prev_ws);
-			snprintf(resp, resp_size, "OK workspace %u\n", prev_ws);
+			ipc_reply(resp, resp_size, "OK workspace %u\n", prev_ws);
 		} else if (strcmp(arg, "back") == 0 || strcmp(arg, "previous") == 0 ||
 		           strcmp(arg, "toggle") == 0 || strcmp(arg, "last") == 0 ||
 		           strcmp(arg, "back_and_forth") == 0) {
 			unsigned int target_ws = server->prev_workspace;
 			change_workspace(server, target_ws);
-			snprintf(resp, resp_size, "OK workspace %u\n", server->current_workspace);
+			ipc_reply(resp, resp_size, "OK workspace %u\n", server->current_workspace);
 		} else {
 			int ws = atoi(arg);
 			if (ws >= 1 && ws <= NUM_WORKSPACES) {
 				change_workspace(server, (unsigned int)ws);
-				snprintf(resp, resp_size, "OK workspace %u\n", (unsigned int)ws);
+				ipc_reply(resp, resp_size, "OK workspace %u\n", (unsigned int)ws);
 			} else {
-				snprintf(resp, resp_size, "ERROR invalid workspace (1-%d, next, prev, back)\n", NUM_WORKSPACES);
+				ipc_reply(resp, resp_size, "ERROR invalid workspace (1-%d, next, prev, back)\n", NUM_WORKSPACES);
 			}
 		}
 		return;
@@ -2594,12 +2674,12 @@ static void ipc_execute_command(struct mint_server *server,
 		if (ws >= 1 && ws <= NUM_WORKSPACES) {
 			if (server->focused_toplevel != NULL) {
 				move_to_workspace(server, (unsigned int)ws);
-				snprintf(resp, resp_size, "OK moved to workspace %u\n", (unsigned int)ws);
+				ipc_reply(resp, resp_size, "OK moved to workspace %u\n", (unsigned int)ws);
 			} else {
-				snprintf(resp, resp_size, "ERROR no focused window\n");
+				ipc_reply(resp, resp_size, "ERROR no focused window\n");
 			}
 		} else {
-			snprintf(resp, resp_size, "ERROR invalid workspace (1-%d, back)\n", NUM_WORKSPACES);
+			ipc_reply(resp, resp_size, "ERROR invalid workspace (1-%d, back)\n", NUM_WORKSPACES);
 		}
 		return;
 	}
@@ -2607,9 +2687,9 @@ static void ipc_execute_command(struct mint_server *server,
 	if (strcmp(cmd, "close") == 0 || strcmp(cmd, "kill") == 0) {
 		if (server->focused_toplevel != NULL) {
 			toplevel_close(server->focused_toplevel);
-			snprintf(resp, resp_size, "OK window closed\n");
+			ipc_reply(resp, resp_size, "OK window closed\n");
 		} else {
-			snprintf(resp, resp_size, "ERROR no focused window\n");
+			ipc_reply(resp, resp_size, "ERROR no focused window\n");
 		}
 		return;
 	}
@@ -2619,32 +2699,32 @@ static void ipc_execute_command(struct mint_server *server,
 		while (*arg == ' ') arg++;
 		if (*arg == '\0' || strcmp(arg, "next") == 0) {
 			focus_cycle(server, false);
-			snprintf(resp, resp_size, "OK focus next\n");
+			ipc_reply(resp, resp_size, "OK focus next\n");
 		} else if (strcmp(arg, "prev") == 0) {
 			focus_cycle(server, true);
-			snprintf(resp, resp_size, "OK focus prev\n");
+			ipc_reply(resp, resp_size, "OK focus prev\n");
 		} else if (strcmp(arg, "master") == 0) {
 			focus_master(server);
-			snprintf(resp, resp_size, "OK focus master\n");
+			ipc_reply(resp, resp_size, "OK focus master\n");
 		} else {
-			snprintf(resp, resp_size, "ERROR unknown focus target (next/prev/master)\n");
+			ipc_reply(resp, resp_size, "ERROR unknown focus target (next/prev/master)\n");
 		}
 		return;
 	}
 
 	if (strcmp(cmd, "swap") == 0 || strcmp(cmd, "zoom") == 0 || strcmp(cmd, "swap master") == 0) {
 		swap_master(server);
-		snprintf(resp, resp_size, "OK swapped master\n");
+		ipc_reply(resp, resp_size, "OK swapped master\n");
 		return;
 	}
 
 	if (strcmp(cmd, "fullscreen") == 0 || strcmp(cmd, "toggle_fullscreen") == 0) {
 		if (server->focused_toplevel != NULL) {
 			toplevel_set_fullscreen(server->focused_toplevel, !server->focused_toplevel->is_fullscreen);
-			snprintf(resp, resp_size, "OK fullscreen %s\n",
+			ipc_reply(resp, resp_size, "OK fullscreen %s\n",
 				server->focused_toplevel->is_fullscreen ? "on" : "off");
 		} else {
-			snprintf(resp, resp_size, "ERROR no focused window\n");
+			ipc_reply(resp, resp_size, "ERROR no focused window\n");
 		}
 		return;
 	}
@@ -2653,22 +2733,22 @@ static void ipc_execute_command(struct mint_server *server,
 	if (strcmp(cmd, "toggle_swallow") == 0 || strcmp(cmd, "swallow") == 0) {
 		if (server->focused_toplevel != NULL) {
 			bool swallowed = toplevel_toggle_swallow(server, server->focused_toplevel);
-			snprintf(resp, resp_size, "OK swallow %s\n", swallowed ? "on" : "off");
+			ipc_reply(resp, resp_size, "OK swallow %s\n", swallowed ? "on" : "off");
 		} else {
-			snprintf(resp, resp_size, "ERROR no focused window\n");
+			ipc_reply(resp, resp_size, "ERROR no focused window\n");
 		}
 		return;
 	}
 
 	if (strcmp(cmd, "get_swallow") == 0) {
 		bool is_swallowing = (server->focused_toplevel != NULL && server->focused_toplevel->swallowing != NULL);
-		snprintf(resp, resp_size, "%d\n", is_swallowing ? 1 : 0);
+		ipc_reply(resp, resp_size, "%d\n", is_swallowing ? 1 : 0);
 		return;
 	}
 
 	if (strcmp(cmd, "toggle_auto_swallow") == 0) {
 		server->auto_swallow = !server->auto_swallow;
-		snprintf(resp, resp_size, "OK auto_swallow %s\n", server->auto_swallow ? "on" : "off");
+		ipc_reply(resp, resp_size, "OK auto_swallow %s\n", server->auto_swallow ? "on" : "off");
 		return;
 	}
 
@@ -2676,18 +2756,18 @@ static void ipc_execute_command(struct mint_server *server,
 		const char *arg = cmd + 12;
 		while (*arg == ' ') arg++;
 		if (*arg == '\0') {
-			snprintf(resp, resp_size, "%d\n", server->auto_swallow ? 1 : 0);
+			ipc_reply(resp, resp_size, "%d\n", server->auto_swallow ? 1 : 0);
 		} else if (strcmp(arg, "toggle") == 0) {
 			server->auto_swallow = !server->auto_swallow;
-			snprintf(resp, resp_size, "OK auto_swallow %s\n", server->auto_swallow ? "on" : "off");
+			ipc_reply(resp, resp_size, "OK auto_swallow %s\n", server->auto_swallow ? "on" : "off");
 		} else if (strcmp(arg, "on") == 0 || strcmp(arg, "1") == 0 || strcmp(arg, "true") == 0) {
 			server->auto_swallow = true;
-			snprintf(resp, resp_size, "OK auto_swallow on\n");
+			ipc_reply(resp, resp_size, "OK auto_swallow on\n");
 		} else if (strcmp(arg, "off") == 0 || strcmp(arg, "0") == 0 || strcmp(arg, "false") == 0) {
 			server->auto_swallow = false;
-			snprintf(resp, resp_size, "OK auto_swallow off\n");
+			ipc_reply(resp, resp_size, "OK auto_swallow off\n");
 		} else {
-			snprintf(resp, resp_size, "ERROR expected on/off/toggle\n");
+			ipc_reply(resp, resp_size, "ERROR expected on/off/toggle\n");
 		}
 		return;
 	}
@@ -2705,12 +2785,12 @@ static void ipc_execute_command(struct mint_server *server,
 		if (server->mfact < 0.1) server->mfact = 0.1;
 		if (server->mfact > 0.9) server->mfact = 0.9;
 		arrange_windows(server);
-		snprintf(resp, resp_size, "OK mfact %.2f\n", server->mfact);
+		ipc_reply(resp, resp_size, "OK mfact %.2f\n", server->mfact);
 		return;
 	}
 
 	if (strcmp(cmd, "get_workspace") == 0) {
-		snprintf(resp, resp_size, "%u\n", server->current_workspace);
+		ipc_reply(resp, resp_size, "%u\n", server->current_workspace);
 		return;
 	}
 
@@ -2725,7 +2805,7 @@ static void ipc_execute_command(struct mint_server *server,
 			}
 		}
 		if (p > buf && *(p - 1) == ' ') *(p - 1) = '\0';
-		snprintf(resp, resp_size, "%s\n", buf);
+		ipc_reply(resp, resp_size, "%s\n", buf);
 		return;
 	}
 
@@ -2734,7 +2814,7 @@ static void ipc_execute_command(struct mint_server *server,
 		if (server->focused_toplevel) {
 			title = toplevel_get_title(server->focused_toplevel);
 		}
-		snprintf(resp, resp_size, "%s\n", title ? title : "");
+		ipc_reply(resp, resp_size, "%s\n", title ? title : "");
 		return;
 	}
 
@@ -2748,6 +2828,8 @@ static void ipc_execute_command(struct mint_server *server,
 		}
 		const char *title = server->focused_toplevel ?
 			toplevel_get_title(server->focused_toplevel) : "";
+		char escaped_title[512];
+		json_escape_string(title ? title : "", escaped_title, sizeof(escaped_title));
 #if CONFIG_SWALLOWING
 		bool is_swallowing = (server->focused_toplevel != NULL && server->focused_toplevel->swallowing != NULL);
 		bool auto_swallow_val = server->auto_swallow;
@@ -2755,20 +2837,20 @@ static void ipc_execute_command(struct mint_server *server,
 		bool is_swallowing = false;
 		bool auto_swallow_val = false;
 #endif
-		snprintf(resp, resp_size, "{\"workspace\":%u,\"windows\":%d,\"title\":\"%s\",\"locked\":%s,\"swallowing\":%s,\"auto_swallow\":%s}\n",
-			server->current_workspace, count, title ? title : "", server->locked ? "true" : "false",
+		ipc_reply(resp, resp_size, "{\"workspace\":%u,\"windows\":%d,\"title\":\"%s\",\"locked\":%s,\"swallowing\":%s,\"auto_swallow\":%s}\n",
+			server->current_workspace, count, escaped_title, server->locked ? "true" : "false",
 			is_swallowing ? "true" : "false", auto_swallow_val ? "true" : "false");
 		return;
 	}
 
 	if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {
-		snprintf(resp, resp_size, "OK exiting\n");
+		ipc_reply(resp, resp_size, "OK exiting\n");
 		wl_display_terminate(server->wl_display);
 		return;
 	}
 
 	if (strcmp(cmd, "help") == 0) {
-		snprintf(resp, resp_size,
+		ipc_reply(resp, resp_size,
 			"Commands:\n"
 			"  sh <cmd>                  Run shell command\n"
 			"  run <cmd>                 Alias for sh\n"
@@ -2792,7 +2874,7 @@ static void ipc_execute_command(struct mint_server *server,
 		return;
 	}
 
-	snprintf(resp, resp_size, "ERROR unknown command '%s', try 'help'\n", cmd);
+	ipc_reply(resp, resp_size, "ERROR unknown command '%s', try 'help'\n", cmd);
 }
 
 static int ipc_handle_client_data(int fd, uint32_t mask, void *data) {
@@ -3469,10 +3551,13 @@ int main(int argc, char *argv[]) {
 
 	setenv("WAYLAND_DISPLAY", socket, true);
 	if (startup_cmd) {
-		if (fork() == 0) {
+		pid_t pid = fork();
+		if (pid == 0) {
 			setsid();
 			execl("/bin/sh", "/bin/sh", "-c", startup_cmd, (char *)NULL);
 			_exit(1);
+		} else if (pid < 0) {
+			wlr_log(WLR_ERROR, "failed to fork startup command");
 		}
 	}
 

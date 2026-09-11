@@ -10,10 +10,12 @@
 #include <stddef.h>
 #include <assert.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
 
+static pthread_mutex_t ctl_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char last_ctl_reply[1024] = "OK MinTwm FUSE ready\n";
 
 /* IPC connection helper */
@@ -84,9 +86,11 @@ static int ipc_query(const char *cmd, char *resp, size_t resp_size) {
 }
 
 /* Helper to strip trailing newlines and whitespace for commands */
-static void sanitize_input(char *dst, const char *src, size_t max) {
+static void sanitize_input(char *dst, const char *src, size_t src_len, size_t max) {
+	if (max == 0) return;
+	size_t limit = (src_len < max - 1) ? src_len : (max - 1);
 	size_t i = 0;
-	while (i < max - 1 && src[i] != '\0') {
+	while (i < limit && src[i] != '\0') {
 		if (src[i] == '\r' || src[i] == '\n') {
 			break;
 		}
@@ -101,17 +105,65 @@ static void sanitize_input(char *dst, const char *src, size_t max) {
 	}
 }
 
-/* Query content for virtual file paths */
-static int get_file_content(const char *path, char *buf, size_t max) {
-	if (strcmp(path, "/current_workspace") == 0) {
-		return ipc_query("get_workspace\n", buf, max);
-	} else if (strcmp(path, "/title") == 0 || strcmp(path, "/windows/active/title") == 0) {
-		return ipc_query("get_title\n", buf, max);
-	} else if (strcmp(path, "/status") == 0) {
-		return ipc_query("status\n", buf, max);
-	} else if (strcmp(path, "/workspaces") == 0) {
-		return ipc_query("get_workspaces\n", buf, max);
-	} else if (strcmp(path, "/mfact") == 0) {
+enum vfile_type {
+	VFILE_REG,
+	VFILE_DIR,
+};
+
+struct vfile_entry {
+	const char *path;
+	mode_t mode;
+	enum vfile_type type;
+	const char *parent_dir;
+	const char *name;
+	const char *read_cmd;
+	const char *write_fmt;
+};
+
+static const struct vfile_entry vfiles[] = {
+	/* Directories */
+	{ "/",                    0755, VFILE_DIR, NULL,             NULL,        NULL,               NULL },
+	{ "/windows",             0755, VFILE_DIR, "/",              "windows",   NULL,               NULL },
+	{ "/windows/active",      0755, VFILE_DIR, "/windows",       "active",    NULL,               NULL },
+
+	/* Root files */
+	{ "/ctl",                 0666, VFILE_REG, "/",              "ctl",       NULL,               "%s\n" },
+	{ "/current_workspace",   0666, VFILE_REG, "/",              "current_workspace", "get_workspace\n", "workspace %s\n" },
+	{ "/title",               0444, VFILE_REG, "/",              "title",     "get_title\n",      NULL },
+	{ "/status",              0444, VFILE_REG, "/",              "status",    "status\n",         NULL },
+	{ "/workspaces",          0444, VFILE_REG, "/",              "workspaces", "get_workspaces\n", NULL },
+	{ "/mfact",               0666, VFILE_REG, "/",              "mfact",     "mfact\n",          "mfact %s\n" },
+	{ "/focus",               0222, VFILE_REG, "/",              "focus",     NULL,               "focus %s\n" },
+	{ "/swallow",             0666, VFILE_REG, "/",              "swallow",   "get_swallow\n",    "toggle_swallow\n" },
+	{ "/auto_swallow",        0666, VFILE_REG, "/",              "auto_swallow", "auto_swallow\n", "auto_swallow %s\n" },
+
+	/* /windows/active files */
+	{ "/windows/active/title",     0444, VFILE_REG, "/windows/active", "title",     "get_title\n",      NULL },
+	{ "/windows/active/ctl",       0222, VFILE_REG, "/windows/active", "ctl",       NULL,               "%s\n" },
+	{ "/windows/active/workspace", 0666, VFILE_REG, "/windows/active", "workspace", "get_workspace\n", "moveto %s\n" },
+	{ "/windows/active/swallow",   0666, VFILE_REG, "/windows/active", "swallow",   "get_swallow\n",    "toggle_swallow\n" },
+};
+
+static const struct vfile_entry *find_entry(const char *path) {
+	for (size_t i = 0; i < sizeof(vfiles) / sizeof(vfiles[0]); i++) {
+		if (strcmp(vfiles[i].path, path) == 0) {
+			return &vfiles[i];
+		}
+	}
+	return NULL;
+}
+
+static int get_file_content(const struct vfile_entry *entry, char *buf, size_t max) {
+	if (!entry || !buf || max == 0) return -ENOENT;
+
+	if (strcmp(entry->path, "/ctl") == 0) {
+		pthread_mutex_lock(&ctl_mutex);
+		snprintf(buf, max, "%s", last_ctl_reply);
+		pthread_mutex_unlock(&ctl_mutex);
+		return 0;
+	}
+
+	if (strcmp(entry->path, "/mfact") == 0) {
 		char reply[128] = {0};
 		if (ipc_query("mfact\n", reply, sizeof(reply)) == 0) {
 			if (strncmp(reply, "OK mfact ", 9) == 0) {
@@ -121,17 +173,16 @@ static int get_file_content(const char *path, char *buf, size_t max) {
 			}
 			return 0;
 		}
-		return -1;
-	} else if (strcmp(path, "/ctl") == 0) {
-		snprintf(buf, max, "%s", last_ctl_reply);
-		return 0;
-	} else if (strcmp(path, "/swallow") == 0 || strcmp(path, "/windows/active/swallow") == 0) {
-		return ipc_query("get_swallow\n", buf, max);
-	} else if (strcmp(path, "/auto_swallow") == 0) {
-		return ipc_query("auto_swallow\n", buf, max);
-	} else if (strcmp(path, "/windows/active/workspace") == 0) {
-		return ipc_query("get_workspace\n", buf, max);
+		return -EIO;
 	}
+
+	if (entry->read_cmd) {
+		if (ipc_query(entry->read_cmd, buf, max) == 0) {
+			return 0;
+		}
+		return -EIO;
+	}
+
 	return -ENOENT;
 }
 
@@ -139,54 +190,20 @@ static int mint_getattr(const char *path, struct stat *stbuf, struct fuse_file_i
 	(void)fi;
 	memset(stbuf, 0, sizeof(struct stat));
 
-	if (strcmp(path, "/") == 0 || strcmp(path, "/windows") == 0 ||
-	    strcmp(path, "/windows/active") == 0) {
-		stbuf->st_mode = S_IFDIR | 0755;
+	const struct vfile_entry *entry = find_entry(path);
+	if (!entry) {
+		return -ENOENT;
+	}
+
+	if (entry->type == VFILE_DIR) {
+		stbuf->st_mode = S_IFDIR | entry->mode;
 		stbuf->st_nlink = 2;
-		return 0;
+	} else {
+		stbuf->st_mode = S_IFREG | entry->mode;
+		stbuf->st_nlink = 1;
+		stbuf->st_size = 0; /* Direct I/O: size 0 avoids IPC query storm on stat/ls */
 	}
-
-	stbuf->st_nlink = 1;
-
-	if (strcmp(path, "/ctl") == 0 ||
-	    strcmp(path, "/current_workspace") == 0 ||
-	    strcmp(path, "/mfact") == 0 ||
-	    strcmp(path, "/swallow") == 0 ||
-	    strcmp(path, "/auto_swallow") == 0 ||
-	    strcmp(path, "/windows/active/swallow") == 0 ||
-	    strcmp(path, "/windows/active/workspace") == 0) {
-		stbuf->st_mode = S_IFREG | 0666;
-		char content[1024];
-		if (get_file_content(path, content, sizeof(content)) == 0) {
-			stbuf->st_size = strlen(content);
-		} else {
-			stbuf->st_size = 64;
-		}
-		return 0;
-	}
-
-	if (strcmp(path, "/title") == 0 ||
-	    strcmp(path, "/status") == 0 ||
-	    strcmp(path, "/workspaces") == 0 ||
-	    strcmp(path, "/windows/active/title") == 0) {
-		stbuf->st_mode = S_IFREG | 0444;
-		char content[1024];
-		if (get_file_content(path, content, sizeof(content)) == 0) {
-			stbuf->st_size = strlen(content);
-		} else {
-			stbuf->st_size = 256;
-		}
-		return 0;
-	}
-
-	if (strcmp(path, "/focus") == 0 ||
-	    strcmp(path, "/windows/active/ctl") == 0) {
-		stbuf->st_mode = S_IFREG | 0222;
-		stbuf->st_size = 0;
-		return 0;
-	}
-
-	return -ENOENT;
+	return 0;
 }
 
 static int mint_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
@@ -195,63 +212,31 @@ static int mint_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	(void)fi;
 	(void)flags;
 
-	if (strcmp(path, "/") == 0) {
-		filler(buf, ".", NULL, 0, 0);
-		filler(buf, "..", NULL, 0, 0);
-		filler(buf, "ctl", NULL, 0, 0);
-		filler(buf, "current_workspace", NULL, 0, 0);
-		filler(buf, "title", NULL, 0, 0);
-		filler(buf, "status", NULL, 0, 0);
-		filler(buf, "workspaces", NULL, 0, 0);
-		filler(buf, "mfact", NULL, 0, 0);
-		filler(buf, "focus", NULL, 0, 0);
-		filler(buf, "swallow", NULL, 0, 0);
-		filler(buf, "auto_swallow", NULL, 0, 0);
-		filler(buf, "windows", NULL, 0, 0);
-		return 0;
+	const struct vfile_entry *dir = find_entry(path);
+	if (!dir || dir->type != VFILE_DIR) {
+		return -ENOENT;
 	}
 
-	if (strcmp(path, "/windows") == 0) {
-		filler(buf, ".", NULL, 0, 0);
-		filler(buf, "..", NULL, 0, 0);
-		filler(buf, "active", NULL, 0, 0);
-		return 0;
+	filler(buf, ".", NULL, 0, 0);
+	filler(buf, "..", NULL, 0, 0);
+
+	for (size_t i = 0; i < sizeof(vfiles) / sizeof(vfiles[0]); i++) {
+		if (vfiles[i].parent_dir && strcmp(vfiles[i].parent_dir, path) == 0) {
+			filler(buf, vfiles[i].name, NULL, 0, 0);
+		}
 	}
 
-	if (strcmp(path, "/windows/active") == 0) {
-		filler(buf, ".", NULL, 0, 0);
-		filler(buf, "..", NULL, 0, 0);
-		filler(buf, "title", NULL, 0, 0);
-		filler(buf, "ctl", NULL, 0, 0);
-		filler(buf, "workspace", NULL, 0, 0);
-		filler(buf, "swallow", NULL, 0, 0);
-		return 0;
-	}
-
-	return -ENOENT;
+	return 0;
 }
 
 static int mint_open(const char *path, struct fuse_file_info *fi) {
+	const struct vfile_entry *entry = find_entry(path);
+	if (!entry || entry->type != VFILE_REG) {
+		return -ENOENT;
+	}
 	/* Direct I/O disables page cache so file reads always reflect live state */
 	fi->direct_io = 1;
-
-	if (strcmp(path, "/ctl") == 0 ||
-	    strcmp(path, "/current_workspace") == 0 ||
-	    strcmp(path, "/title") == 0 ||
-	    strcmp(path, "/status") == 0 ||
-	    strcmp(path, "/workspaces") == 0 ||
-	    strcmp(path, "/mfact") == 0 ||
-	    strcmp(path, "/focus") == 0 ||
-	    strcmp(path, "/swallow") == 0 ||
-	    strcmp(path, "/auto_swallow") == 0 ||
-	    strcmp(path, "/windows/active/title") == 0 ||
-	    strcmp(path, "/windows/active/ctl") == 0 ||
-	    strcmp(path, "/windows/active/workspace") == 0 ||
-	    strcmp(path, "/windows/active/swallow") == 0) {
-		return 0;
-	}
-
-	return -ENOENT;
+	return 0;
 }
 
 static int mint_truncate(const char *path, off_t size, struct fuse_file_info *fi) {
@@ -264,9 +249,16 @@ static int mint_truncate(const char *path, off_t size, struct fuse_file_info *fi
 static int mint_read(const char *path, char *buf, size_t size, off_t offset,
 		struct fuse_file_info *fi) {
 	(void)fi;
-	char content[2048] = {0};
+	const struct vfile_entry *entry = find_entry(path);
+	if (!entry || entry->type != VFILE_REG) {
+		return -ENOENT;
+	}
+	if (!(entry->mode & 0444)) {
+		return -EACCES;
+	}
 
-	int res = get_file_content(path, content, sizeof(content));
+	char content[2048] = {0};
+	int res = get_file_content(entry, content, sizeof(content));
 	if (res < 0) {
 		return res;
 	}
@@ -289,60 +281,32 @@ static int mint_write(const char *path, const char *buf, size_t size,
 	(void)offset;
 	(void)fi;
 
+	const struct vfile_entry *entry = find_entry(path);
+	if (!entry || entry->type != VFILE_REG) {
+		return -ENOENT;
+	}
+	if (!(entry->mode & 0222) || !entry->write_fmt) {
+		return -EACCES;
+	}
+
 	char clean[512];
-	sanitize_input(clean, buf, sizeof(clean));
+	sanitize_input(clean, buf, size, sizeof(clean));
 
 	char cmd[576];
-
-	if (strcmp(path, "/ctl") == 0) {
-		snprintf(cmd, sizeof(cmd), "%s\n", clean);
-		ipc_query(cmd, last_ctl_reply, sizeof(last_ctl_reply));
-		return (int)size;
+	if (strchr(entry->write_fmt, '%')) {
+		snprintf(cmd, sizeof(cmd), entry->write_fmt, clean);
+	} else {
+		snprintf(cmd, sizeof(cmd), "%s", entry->write_fmt);
 	}
 
-	if (strcmp(path, "/current_workspace") == 0) {
-		snprintf(cmd, sizeof(cmd), "workspace %s\n", clean);
-		ipc_query(cmd, last_ctl_reply, sizeof(last_ctl_reply));
-		return (int)size;
-	}
+	char reply[1024] = {0};
+	ipc_query(cmd, reply, sizeof(reply));
 
-	if (strcmp(path, "/focus") == 0) {
-		snprintf(cmd, sizeof(cmd), "focus %s\n", clean);
-		ipc_query(cmd, last_ctl_reply, sizeof(last_ctl_reply));
-		return (int)size;
-	}
+	pthread_mutex_lock(&ctl_mutex);
+	memcpy(last_ctl_reply, reply, sizeof(last_ctl_reply));
+	pthread_mutex_unlock(&ctl_mutex);
 
-	if (strcmp(path, "/mfact") == 0) {
-		snprintf(cmd, sizeof(cmd), "mfact %s\n", clean);
-		ipc_query(cmd, last_ctl_reply, sizeof(last_ctl_reply));
-		return (int)size;
-	}
-
-	if (strcmp(path, "/swallow") == 0 || strcmp(path, "/windows/active/swallow") == 0) {
-		snprintf(cmd, sizeof(cmd), "toggle_swallow\n");
-		ipc_query(cmd, last_ctl_reply, sizeof(last_ctl_reply));
-		return (int)size;
-	}
-
-	if (strcmp(path, "/auto_swallow") == 0) {
-		snprintf(cmd, sizeof(cmd), "auto_swallow %s\n", clean);
-		ipc_query(cmd, last_ctl_reply, sizeof(last_ctl_reply));
-		return (int)size;
-	}
-
-	if (strcmp(path, "/windows/active/ctl") == 0) {
-		snprintf(cmd, sizeof(cmd), "%s\n", clean);
-		ipc_query(cmd, last_ctl_reply, sizeof(last_ctl_reply));
-		return (int)size;
-	}
-
-	if (strcmp(path, "/windows/active/workspace") == 0) {
-		snprintf(cmd, sizeof(cmd), "moveto %s\n", clean);
-		ipc_query(cmd, last_ctl_reply, sizeof(last_ctl_reply));
-		return (int)size;
-	}
-
-	return -EACCES;
+	return (int)size;
 }
 
 static const struct fuse_operations mint_oper = {
@@ -380,15 +344,18 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char *argv[]) {
-	if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
+	if (argc < 2 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
 		print_usage(argv[0]);
-		return 0;
+		return (argc < 2) ? 1 : 0;
 	}
 
-  if (mkdir(argv[argc - 1], 0700) == -1 && errno != EEXIST) {
-    perror("mkdir");
-    return 1;
-  }
+	const char *mountpoint = argv[argc - 1];
+	if (mountpoint[0] != '-') {
+		if (mkdir(mountpoint, 0700) == -1 && errno != EEXIST) {
+			perror("mkdir");
+			return 1;
+		}
+	}
 
 	return fuse_main(argc, argv, &mint_oper, NULL);
 }

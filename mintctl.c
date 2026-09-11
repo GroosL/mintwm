@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -73,13 +74,24 @@ int main(int argc, char *argv[]) {
 	}
 
 	char cmd[2048] = {0};
+	size_t off = 0;
 	for (int i = 1; i < argc; i++) {
-		if (i > 1) {
-			strcat(cmd, " ");
+		if (i > 1 && off + 1 < sizeof(cmd)) {
+			cmd[off++] = ' ';
 		}
-		strncat(cmd, argv[i], sizeof(cmd) - strlen(cmd) - 2);
+		int n = snprintf(cmd + off, sizeof(cmd) - off, "%s", argv[i]);
+		if (n > 0) {
+			off += (size_t)n;
+			if (off >= sizeof(cmd) - 2) {
+				off = sizeof(cmd) - 2;
+				break;
+			}
+		}
 	}
-	strcat(cmd, "\n");
+	if (off + 1 < sizeof(cmd)) {
+		cmd[off++] = '\n';
+		cmd[off] = '\0';
+	}
 
 	size_t len = strlen(cmd);
 	if (write(fd, cmd, len) != (ssize_t)len) {
@@ -88,11 +100,22 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	char response[2048];
-	ssize_t n = read(fd, response, sizeof(response) - 1);
-	if (n > 0) {
-		response[n] = '\0';
-		fputs(response, stdout);
+	bool is_subscribe = (strcmp(argv[1], "subscribe") == 0);
+	if (is_subscribe) {
+		char response[1024];
+		ssize_t n;
+		while ((n = read(fd, response, sizeof(response) - 1)) > 0) {
+			response[n] = '\0';
+			fputs(response, stdout);
+			fflush(stdout);
+		}
+	} else {
+		char response[2048];
+		ssize_t n = read(fd, response, sizeof(response) - 1);
+		if (n > 0) {
+			response[n] = '\0';
+			fputs(response, stdout);
+		}
 	}
 
 	close(fd);

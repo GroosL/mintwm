@@ -29,6 +29,12 @@
 #ifndef CONFIG_PRIMARY_SELECTION
 #define CONFIG_PRIMARY_SELECTION 1
 #endif
+#ifndef CONFIG_RELATIVE_POINTER
+#define CONFIG_RELATIVE_POINTER 1
+#endif
+#ifndef CONFIG_POINTER_CONSTRAINTS
+#define CONFIG_POINTER_CONSTRAINTS 1
+#endif
 #ifndef CONFIG_SWALLOWING
 #define CONFIG_SWALLOWING 1
 #endif
@@ -48,6 +54,9 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
@@ -100,6 +109,15 @@
 
 #if CONFIG_VIEWPORTER
 #include <wlr/types/wlr_viewporter.h>
+#endif
+
+#if CONFIG_RELATIVE_POINTER
+#include <wlr/types/wlr_relative_pointer_v1.h>
+#endif
+
+#if CONFIG_POINTER_CONSTRAINTS
+#include <wlr/types/wlr_pointer_constraints_v1.h>
+#include <wlr/util/region.h>
 #endif
 
 #if CONFIG_XWAYLAND
@@ -194,6 +212,14 @@ struct mint_server {
 	struct wl_listener cursor_button;
 	struct wl_listener cursor_axis;
 	struct wl_listener cursor_frame;
+#if CONFIG_RELATIVE_POINTER
+	struct wlr_relative_pointer_manager_v1 *relative_pointer_mgr;
+#endif
+#if CONFIG_POINTER_CONSTRAINTS
+	struct wlr_pointer_constraints_v1 *pointer_constraints;
+	struct wlr_pointer_constraint_v1 *active_constraint;
+	struct wl_listener new_pointer_constraint;
+#endif
 
 	struct wlr_seat *seat;
 	struct wl_listener new_input;
@@ -313,6 +339,15 @@ static inline bool toplevel_is_unmanaged(const struct mint_toplevel *tl) {
 	return false;
 }
 
+#if CONFIG_POINTER_CONSTRAINTS
+struct mint_pointer_constraint {
+	struct mint_server *server;
+	struct wlr_pointer_constraint_v1 *constraint;
+	struct wl_listener destroy;
+	struct wl_listener set_region;
+};
+#endif
+
 #if CONFIG_LAYER_SHELL
 struct mint_layer_surface {
 	struct wl_list link;
@@ -360,6 +395,11 @@ static void arrange_layers(struct mint_output *output);
 static void update_lock_bg(struct mint_server *server);
 static void focus_toplevel(struct mint_server *server, struct mint_toplevel *toplevel);
 static void toplevel_set_fullscreen(struct mint_toplevel *tl, bool fullscreen);
+static struct mint_toplevel *toplevel_from_wlr_surface(struct mint_server *server, struct wlr_surface *s);
+#if CONFIG_POINTER_CONSTRAINTS
+static void constraint_set_active(struct mint_server *server,
+		struct wlr_pointer_constraint_v1 *constraint);
+#endif
 static struct mint_output *get_active_output(struct mint_server *server);
 static void ipc_broadcast_state(struct mint_server *server);
 static void ipc_execute_command(struct mint_server *server,
@@ -831,6 +871,11 @@ static void focus_toplevel(struct mint_server *server, struct mint_toplevel *top
 	if (server->focused_toplevel && server->focused_toplevel != toplevel) {
 		toplevel_set_activated(server->focused_toplevel, false);
 	}
+#if CONFIG_POINTER_CONSTRAINTS
+	if (server->active_constraint && (!toplevel || toplevel_from_wlr_surface(server, server->active_constraint->surface) != toplevel)) {
+		constraint_set_active(server, NULL);
+	}
+#endif
 
 	if (toplevel == NULL) {
 		server->focused_toplevel = NULL;
@@ -1454,6 +1499,12 @@ static void seat_pointer_focus_change(struct wl_listener *listener, void *data) 
 	struct mint_server *server = wl_container_of(
 			listener, server, pointer_focus_change);
 	struct wlr_seat_pointer_focus_change_event *event = data;
+#if CONFIG_POINTER_CONSTRAINTS
+	if (server->active_constraint &&
+			event->new_surface != server->active_constraint->surface) {
+		constraint_set_active(server, NULL);
+	}
+#endif
 	if (event->new_surface == NULL) {
 		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
 	}
@@ -1498,6 +1549,158 @@ static struct mint_toplevel *desktop_toplevel_at(
 	return tree ? tree->node.data : NULL;
 }
 
+static struct mint_toplevel *toplevel_from_wlr_surface(
+		struct mint_server *server, struct wlr_surface *s) {
+	if (!s) {
+		return NULL;
+	}
+	struct wlr_surface *root_surface = wlr_surface_get_root_surface(s);
+	struct wlr_xdg_surface *xdg_surface = wlr_xdg_surface_try_from_wlr_surface(root_surface);
+	while (xdg_surface != NULL) {
+		if (xdg_surface->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
+			struct wlr_scene_tree *tree = xdg_surface->data;
+			return tree ? tree->node.data : NULL;
+		}
+		if (xdg_surface->role == WLR_XDG_SURFACE_ROLE_POPUP && xdg_surface->popup && xdg_surface->popup->parent) {
+			xdg_surface = wlr_xdg_surface_try_from_wlr_surface(xdg_surface->popup->parent);
+		} else {
+			break;
+		}
+	}
+#if CONFIG_XWAYLAND
+	struct wlr_xwayland_surface *xsurface = wlr_xwayland_surface_try_from_wlr_surface(root_surface);
+	while (xsurface != NULL) {
+		if (xsurface->data) {
+			return xsurface->data;
+		}
+		xsurface = xsurface->parent;
+	}
+#endif
+	return NULL;
+}
+
+#if CONFIG_POINTER_CONSTRAINTS
+static void warp_to_constraint_cursor_hint(struct mint_server *server,
+		struct wlr_pointer_constraint_v1 *constraint) {
+	if (!constraint || !constraint->current.cursor_hint.enabled) {
+		return;
+	}
+	struct mint_toplevel *tl = toplevel_from_wlr_surface(server, constraint->surface);
+	if (!tl || !tl->scene_tree) {
+		return;
+	}
+	int lx, ly;
+	if (!wlr_scene_node_coords(&tl->scene_tree->node, &lx, &ly)) {
+		return;
+	}
+	double sx = constraint->current.cursor_hint.x;
+	double sy = constraint->current.cursor_hint.y;
+	wlr_cursor_warp(server->cursor, NULL, (double)lx + sx, (double)ly + sy);
+	wlr_seat_pointer_warp(constraint->seat, sx, sy);
+}
+
+static void constraint_set_active(struct mint_server *server,
+		struct wlr_pointer_constraint_v1 *constraint) {
+	if (server->active_constraint == constraint) {
+		return;
+	}
+	if (server->active_constraint) {
+		warp_to_constraint_cursor_hint(server, server->active_constraint);
+		wlr_pointer_constraint_v1_send_deactivated(server->active_constraint);
+	}
+	server->active_constraint = constraint;
+	if (constraint) {
+		wlr_pointer_constraint_v1_send_activated(constraint);
+	}
+}
+
+static void check_constraint(struct mint_server *server, struct wlr_surface *surface,
+		double sx, double sy) {
+	if (!server->pointer_constraints || server->locked) {
+		if (server->active_constraint) {
+			constraint_set_active(server, NULL);
+		}
+		return;
+	}
+
+	struct wlr_pointer_constraint_v1 *constraint = NULL;
+	if (surface) {
+		constraint = wlr_pointer_constraints_v1_constraint_for_surface(
+			server->pointer_constraints, surface, server->seat);
+	}
+
+	if (constraint == server->active_constraint) {
+		return;
+	}
+
+	if (constraint) {
+		bool inside = false;
+		if (pixman_region32_not_empty(&constraint->region)) {
+			inside = pixman_region32_contains_point(
+				&constraint->region, (int)sx, (int)sy, NULL);
+		} else {
+			inside = (sx >= 0 && sx < surface->current.width &&
+				  sy >= 0 && sy < surface->current.height);
+		}
+		if (inside) {
+			constraint_set_active(server, constraint);
+			return;
+		}
+	}
+
+	constraint_set_active(server, NULL);
+}
+
+static void handle_pointer_constraint_destroy(struct wl_listener *listener, void *data) {
+	struct mint_pointer_constraint *constraint =
+		wl_container_of(listener, constraint, destroy);
+	struct mint_server *server = constraint->server;
+
+	if (server->active_constraint == constraint->constraint) {
+		warp_to_constraint_cursor_hint(server, constraint->constraint);
+		server->active_constraint = NULL;
+	}
+
+	wl_list_remove(&constraint->destroy.link);
+	wl_list_remove(&constraint->set_region.link);
+	free(constraint);
+}
+
+static void handle_pointer_constraint_set_region(struct wl_listener *listener, void *data) {
+	struct mint_pointer_constraint *constraint =
+		wl_container_of(listener, constraint, set_region);
+	struct mint_server *server = constraint->server;
+	if (server->active_constraint == constraint->constraint &&
+			server->seat->pointer_state.focused_surface == constraint->constraint->surface) {
+		check_constraint(server, constraint->constraint->surface,
+			server->seat->pointer_state.sx, server->seat->pointer_state.sy);
+	}
+}
+
+static void handle_new_pointer_constraint(struct wl_listener *listener, void *data) {
+	struct mint_server *server = wl_container_of(listener, server, new_pointer_constraint);
+	struct wlr_pointer_constraint_v1 *wlr_constraint = data;
+
+	struct mint_pointer_constraint *constraint = calloc(1, sizeof(*constraint));
+	if (!constraint) {
+		return;
+	}
+	constraint->server = server;
+	constraint->constraint = wlr_constraint;
+
+	constraint->destroy.notify = handle_pointer_constraint_destroy;
+	wl_signal_add(&wlr_constraint->events.destroy, &constraint->destroy);
+
+	constraint->set_region.notify = handle_pointer_constraint_set_region;
+	wl_signal_add(&wlr_constraint->events.set_region, &constraint->set_region);
+
+	if (server->seat->pointer_state.focused_surface == wlr_constraint->surface) {
+		check_constraint(server, wlr_constraint->surface,
+			server->seat->pointer_state.sx, server->seat->pointer_state.sy);
+	}
+}
+#endif
+
 static void process_cursor_motion(struct mint_server *server, uint32_t time) {
 	double sx, sy;
 	struct wlr_seat *seat = server->seat;
@@ -1513,14 +1716,68 @@ static void process_cursor_motion(struct mint_server *server, uint32_t time) {
 	} else {
 		wlr_seat_pointer_clear_focus(seat);
 	}
+#if CONFIG_POINTER_CONSTRAINTS
+	check_constraint(server, surface, sx, sy);
+#endif
 }
 
 static void server_cursor_motion(struct wl_listener *listener, void *data) {
 	struct mint_server *server =
 		wl_container_of(listener, server, cursor_motion);
 	struct wlr_pointer_motion_event *event = data;
-	wlr_cursor_move(server->cursor, &event->pointer->base,
-			event->delta_x, event->delta_y);
+
+#if CONFIG_RELATIVE_POINTER
+	if (server->relative_pointer_mgr) {
+		wlr_relative_pointer_manager_v1_send_relative_motion(
+			server->relative_pointer_mgr, server->seat,
+			(uint64_t)event->time_msec * 1000,
+			event->delta_x, event->delta_y,
+			event->unaccel_dx, event->unaccel_dy);
+	}
+#endif
+
+	double dx = event->delta_x;
+	double dy = event->delta_y;
+
+#if CONFIG_POINTER_CONSTRAINTS
+	if (server->active_constraint &&
+			server->seat->pointer_state.focused_surface == server->active_constraint->surface) {
+		if (server->active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED) {
+			return;
+		}
+
+		struct mint_toplevel *tl = toplevel_from_wlr_surface(server, server->active_constraint->surface);
+		if (tl && tl->scene_tree) {
+			int lx, ly;
+			if (wlr_scene_node_coords(&tl->scene_tree->node, &lx, &ly)) {
+				double sx = server->cursor->x - lx;
+				double sy = server->cursor->y - ly;
+				double sx_confined, sy_confined;
+
+				pixman_region32_t conf_reg;
+				const pixman_region32_t *region_to_use;
+				pixman_region32_init(&conf_reg);
+				if (pixman_region32_not_empty(&server->active_constraint->region)) {
+					region_to_use = &server->active_constraint->region;
+				} else {
+					pixman_region32_init_rect(&conf_reg, 0, 0,
+						server->active_constraint->surface->current.width,
+						server->active_constraint->surface->current.height);
+					region_to_use = &conf_reg;
+				}
+
+				if (wlr_region_confine(region_to_use, sx, sy,
+						sx + dx, sy + dy, &sx_confined, &sy_confined)) {
+					dx = sx_confined - sx;
+					dy = sy_confined - sy;
+				}
+				pixman_region32_fini(&conf_reg);
+			}
+		}
+	}
+#endif
+
+	wlr_cursor_move(server->cursor, &event->pointer->base, dx, dy);
 	process_cursor_motion(server, event->time_msec);
 }
 
@@ -1529,6 +1786,15 @@ static void server_cursor_motion_absolute(
 	struct mint_server *server =
 		wl_container_of(listener, server, cursor_motion_absolute);
 	struct wlr_pointer_motion_absolute_event *event = data;
+
+#if CONFIG_POINTER_CONSTRAINTS
+	if (server->active_constraint &&
+			server->active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED &&
+			server->seat->pointer_state.focused_surface == server->active_constraint->surface) {
+		return;
+	}
+#endif
+
 	wlr_cursor_warp_absolute(server->cursor, &event->pointer->base, event->x,
 		event->y);
 	process_cursor_motion(server, event->time_msec);
@@ -2004,6 +2270,9 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	}
 
 	free(toplevel);
+#ifdef __GLIBC__
+	malloc_trim(0);
+#endif
 }
 
 static void xdg_toplevel_request_move(struct wl_listener *listener, void *data) {
@@ -2473,6 +2742,9 @@ static void xwayland_surface_destroy(struct wl_listener *listener, void *data) {
 	}
 
 	free(toplevel);
+#ifdef __GLIBC__
+	malloc_trim(0);
+#endif
 }
 
 static void handle_new_xwayland_surface(struct wl_listener *listener, void *data) {
@@ -3493,6 +3765,9 @@ static void server_new_session_lock(struct wl_listener *listener, void *data) {
 
 	server->session_lock = lock;
 	server->locked = true;
+#if CONFIG_POINTER_CONSTRAINTS
+	constraint_set_active(server, NULL);
+#endif
 
 	update_lock_bg(server);
 	if (server->lock_bg) {
@@ -3640,6 +3915,10 @@ static bool server_global_filter(const struct wl_client *client,
 #endif
 
 int main(int argc, char *argv[]) {
+#ifdef __GLIBC__
+	mallopt(M_ARENA_MAX, 2);
+	mallopt(M_TRIM_THRESHOLD, 64 * 1024);
+#endif
 	wlr_log_init(WLR_INFO, NULL);
 	char *startup_cmd = NULL;
 
@@ -3713,6 +3992,21 @@ int main(int argc, char *argv[]) {
 
 #if CONFIG_VIEWPORTER
 	wlr_viewporter_create(server.wl_display);
+#endif
+
+#if CONFIG_RELATIVE_POINTER
+	server.relative_pointer_mgr =
+		wlr_relative_pointer_manager_v1_create(server.wl_display);
+#endif
+
+#if CONFIG_POINTER_CONSTRAINTS
+	server.pointer_constraints =
+		wlr_pointer_constraints_v1_create(server.wl_display);
+	if (server.pointer_constraints) {
+		server.new_pointer_constraint.notify = handle_new_pointer_constraint;
+		wl_signal_add(&server.pointer_constraints->events.new_constraint,
+			&server.new_pointer_constraint);
+	}
 #endif
 
 #if CONFIG_SCREENCOPY
@@ -3806,6 +4100,7 @@ int main(int argc, char *argv[]) {
 	wlr_cursor_attach_output_layout(server.cursor, server.output_layout);
 
 	server.cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
+	wlr_xcursor_manager_load(server.cursor_mgr, 1.0f);
 
 	server.cursor_motion.notify = server_cursor_motion;
 	wl_signal_add(&server.cursor->events.motion, &server.cursor_motion);
@@ -3823,6 +4118,7 @@ int main(int argc, char *argv[]) {
 	server.new_input.notify = server_new_input;
 	wl_signal_add(&server.backend->events.new_input, &server.new_input);
 	server.seat = wlr_seat_create(server.wl_display, "seat0");
+	wlr_seat_set_capabilities(server.seat, WL_SEAT_CAPABILITY_POINTER);
 #if CONFIG_XWAYLAND
 	if (server.xwayland) {
 		wlr_xwayland_set_seat(server.xwayland, server.seat);
@@ -3903,6 +4199,11 @@ int main(int argc, char *argv[]) {
 #if CONFIG_SESSION_LOCK
 	if (server.session_lock_mgr) {
 		wl_list_remove(&server.new_session_lock.link);
+	}
+#endif
+#if CONFIG_POINTER_CONSTRAINTS
+	if (server.pointer_constraints) {
+		wl_list_remove(&server.new_pointer_constraint.link);
 	}
 #endif
 

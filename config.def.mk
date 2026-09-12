@@ -33,6 +33,12 @@ DATA_CONTROL ?= 1
 # Primary selection protocol (middle-click clipboard paste)
 PRIMARY_SELECTION ?= 1
 
+# wp_relative_pointer_v1 support (relative mouse motion for games, 3D apps)
+RELATIVE_POINTER ?= 1
+
+# wp_pointer_constraints_v1 support (cursor locking & confinement for games, etc.)
+POINTER_CONSTRAINTS ?= 1
+
 # ==============================================================================
 # Window Management Features (1 = enable, 0 = disable)
 # ==============================================================================

@@ -9,11 +9,11 @@ WAYLAND_SCANNER ?= wayland-scanner
 
 # Base dependencies
 ifeq ($(XWAYLAND),1)
-PKGS = wlroots-0.20 wayland-server xkbcommon xcb xcb-ewmh xcb-icccm
-PKGS_FALLBACK = wlroots wayland-server xkbcommon xcb xcb-ewmh xcb-icccm
+PKGS = wlroots-0.20 wayland-server xkbcommon xcb xcb-ewmh xcb-icccm pixman-1
+PKGS_FALLBACK = wlroots wayland-server xkbcommon xcb xcb-ewmh xcb-icccm pixman-1
 else
-PKGS = wlroots-0.20 wayland-server xkbcommon
-PKGS_FALLBACK = wlroots wayland-server xkbcommon
+PKGS = wlroots-0.20 wayland-server xkbcommon pixman-1
+PKGS_FALLBACK = wlroots wayland-server xkbcommon pixman-1
 endif
 
 CFLAGS_PKG != $(PKG_CONFIG) --cflags $(PKGS) 2>/dev/null || $(PKG_CONFIG) --cflags $(PKGS_FALLBACK)
@@ -33,6 +33,8 @@ DEFINES += -DCONFIG_XDG_DECORATION=$(XDG_DECORATION)
 DEFINES += -DCONFIG_VIEWPORTER=$(VIEWPORTER)
 DEFINES += -DCONFIG_DATA_CONTROL=$(DATA_CONTROL)
 DEFINES += -DCONFIG_PRIMARY_SELECTION=$(PRIMARY_SELECTION)
+DEFINES += -DCONFIG_RELATIVE_POINTER=$(RELATIVE_POINTER)
+DEFINES += -DCONFIG_POINTER_CONSTRAINTS=$(POINTER_CONSTRAINTS)
 DEFINES += -DCONFIG_SWALLOWING=$(SWALLOWING)
 DEFINES += -DCONFIG_GAPS=$(GAPS)
 

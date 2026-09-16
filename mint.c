@@ -38,6 +38,9 @@
 #ifndef CONFIG_SWALLOWING
 #define CONFIG_SWALLOWING 1
 #endif
+#ifndef CONFIG_GAPS
+#define CONFIG_GAPS 1
+#endif
 #include <assert.h>
 #include <getopt.h>
 #include <stdbool.h>
@@ -759,34 +762,8 @@ static void arrange_windows(struct mint_server *server) {
 		}
 		return;
 	}
-#else
-	int g = 0;
-	if (count == 1) {
-		toplevel_set_size_and_position(tiled[0], area.x, area.y, area.width, area.height);
-		return;
-	}
-#endif
 
-	/* DWM Master-and-Stack Tiling with Gaps */
-	if (g == 0) {
-		int mw = (int)(area.width * server->mfact);
-		if (mw < 60) mw = 60;
-		if (mw > area.width - 60) mw = area.width - 60;
-
-		int sw = area.width - mw;
-		int sx = area.x + mw;
-		int num_stack = count - 1;
-
-		toplevel_set_size_and_position(tiled[0], area.x, area.y, mw, area.height);
-		for (int i = 1; i < count; i++) {
-			int sh = area.height / num_stack;
-			int si = i - 1;
-			int sy = area.y + si * sh;
-			int h = (si == num_stack - 1) ? (area.height - si * sh) : sh;
-
-			toplevel_set_size_and_position(tiled[i], sx, sy, sw, h);
-		}
-	} else {
+	if (g > 0) {
 		int x0 = area.x + g;
 		int y0 = area.y + g;
 		int inner_w = area.width - 2 * g;
@@ -814,6 +791,32 @@ static void arrange_windows(struct mint_server *server) {
 
 			toplevel_set_size_and_position(tiled[i], sx, sy, sw, h);
 		}
+		return;
+	}
+#else
+	if (count == 1) {
+		toplevel_set_size_and_position(tiled[0], area.x, area.y, area.width, area.height);
+		return;
+	}
+#endif
+
+	/* Standard DWM Master-and-Stack Tiling (no gaps) */
+	int mw = (int)(area.width * server->mfact);
+	if (mw < 60) mw = 60;
+	if (mw > area.width - 60) mw = area.width - 60;
+
+	int sw = area.width - mw;
+	int sx = area.x + mw;
+	int num_stack = count - 1;
+
+	toplevel_set_size_and_position(tiled[0], area.x, area.y, mw, area.height);
+	for (int i = 1; i < count; i++) {
+		int sh = area.height / num_stack;
+		int si = i - 1;
+		int sy = area.y + si * sh;
+		int h = (si == num_stack - 1) ? (area.height - si * sh) : sh;
+
+		toplevel_set_size_and_position(tiled[i], sx, sy, sw, h);
 	}
 }
 
